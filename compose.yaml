@@ -1,0 +1,98 @@
+name: shopping-agent-v2
+x-agent-env: &agent-env
+  DATABASE: postgresql://shopping:shopping@postgres:5432/agent
+  ELASTIC_URL: http://elastic:9200
+  REDIS_URL: redis://redis:6379/0
+  PLATFORM_URL: http://platform:8001/mcp
+  PLATFORM_TRANSPORT: mcp
+  PLATFORM_TOKEN: compose-platform-token
+  DEMO: "1"
+  EMBEDDED_WORKER: "0"
+  CHECKOUT_ENABLED: "${CHECKOUT_ENABLED:-1}"
+  AUTOBUY_ENABLED: "${AUTOBUY_ENABLED:-0}"
+  MODEL_URL: "${MODEL_URL:-}"
+  MODEL_KEY: "${MODEL_KEY:-}"
+  CHAT_MODEL: "${CHAT_MODEL:-}"
+  EMBEDDING_URL: "${EMBEDDING_URL:-}"
+  EMBEDDING_KEY: "${EMBEDDING_KEY:-}"
+  EMBEDDING_MODEL: "${EMBEDDING_MODEL:-}"
+  RERANK_URL: "${RERANK_URL:-}"
+  RERANK_KEY: "${RERANK_KEY:-}"
+  RERANK_MODEL: "${RERANK_MODEL:-}"
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: shopping
+      POSTGRES_PASSWORD: shopping
+      POSTGRES_DB: agent
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./deploy/create_platform_db.sql:/docker-entrypoint-initdb.d/10-platform.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopping -d agent"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  elastic:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms768m -Xmx768m"
+    volumes:
+      - elastic:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow"]
+      interval: 5s
+      timeout: 5s
+      retries: 25
+  platform:
+    build: .
+    command: ["platform", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      PLATFORM_DATABASE: postgresql://shopping:shopping@postgres:5432/platform
+      PLATFORM_TOKEN: compose-platform-token
+      OFFER_EVENT_URL: http://api:8000/internal/offer-events
+      DEMO: "1"
+    ports: ["127.0.0.1:8001:8001"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  indexer:
+    build: .
+    command: ["reindex"]
+    environment: *agent-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      elastic: {condition: service_healthy}
+  api:
+    build: .
+    command: ["api", "--host", "0.0.0.0"]
+    environment: *agent-env
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      indexer: {condition: service_completed_successfully}
+      platform: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  worker:
+    build: .
+    command: ["worker"]
+    environment: *agent-env
+    depends_on:
+      indexer: {condition: service_completed_successfully}
+      platform: {condition: service_healthy}
+volumes:
+  postgres:
+  elastic:

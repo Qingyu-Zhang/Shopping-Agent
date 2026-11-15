@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shopping-agent-v2"
+version = "0.1.0"
+description = "English shopping research and commerce workflows"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "httpx>=0.28,<0.29",
+  "sqlalchemy>=2,<3", "psycopg[binary,pool]>=3.2,<4", "redis>=5,<9",
+  "langgraph>=1,<2", "langgraph-checkpoint-postgres>=3,<4", "mcp>=1.17,<2",
+  "langgraph-checkpoint-sqlite>=3,<4", "pyjwt>=2.10,<3", "tzdata>=2025.1", "python-dotenv>=1,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+vision = ["torch>=2.5", "transformers>=4.49", "pillow>=11"]
+
+[tool.setuptools.packages.find]
+include = ["shopping_agent*"]
+
+[tool.setuptools.package-data]
+shopping_agent = ["demo.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

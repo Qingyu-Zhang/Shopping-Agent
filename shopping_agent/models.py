@@ -41,7 +41,12 @@ class Models:
         return response.json()
 
     def chat(self, messages, *, tools=None, structured=False):
-        body = {"model": self.settings.chat_model, "messages": messages, "temperature": 0, "max_tokens": 650}
+        body = {"model": self.settings.chat_model, "messages": messages, "temperature": 0}
+        if self.settings.chat_model == "gpt-6-luna":
+            # Luna requires reasoning to be disabled for Chat Completions tool calls.
+            body.update(reasoning_effort="none", max_completion_tokens=650)
+        else:
+            body["max_tokens"] = 650
         if tools:
             body.update(tools=tools, tool_choice="auto")
         if structured:

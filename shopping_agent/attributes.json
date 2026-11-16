@@ -1,0 +1,24 @@
+{
+  "categories": {
+    "dock": {"query": "\\bdock(?:s|ing station)?\\b|\\b(?:usb[ -]?c |thunderbolt )?hub\\b", "catalog": "\\b(docking station|usb[ -]?c hub|thunderbolt dock|dock for)\\b"},
+    "laptop": {"query": "\\b(laptops?|notebooks?|chromebooks?|computers?)\\b", "catalog": "\\b(laptops|laptop computer|notebook computer|chromebook)\\b", "attributes": ["ram_gb"]},
+    "monitor": {"query": "\\b(monitors?|external displays?)\\b", "catalog": "\\b(monitors|display monitor|gaming monitor)\\b", "attributes": ["refresh_rate_hz"]},
+    "filter": {"query": "\\b(filters?|filter cartridges?)\\b", "catalog": "\\b(air purifier filter|replacement air filter)\\b"},
+    "pet_food": {"query": "\\b(cat food|kitten food|pet food)\\b", "catalog": "\\b(cat food|kitten food)\\b"},
+    "shoes": {"query": "\\b(shoes?|sneakers?|boots?|sandals?|loafers?|slippers?|heels?|pumps?|moccasins?)\\b", "attributes": ["color", "shoe_size_us", "material"]},
+    "clothing": {"query": "\\b(shirts?|t[ -]?shirts?|dresses?|skirts?|jackets?|sweaters?|cardigans?|pants|jeans|shorts|leggings|coats?|hoodies?|blouses?|tops?)\\b", "attributes": ["color", "size", "material"]},
+    "bags": {"query": "\\b(handbags?|purses?|crossbod(?:y|ies)|totes?|backpacks?|wallets?)\\b", "attributes": ["color", "material"]},
+    "jewelry": {"query": "\\b(jewel(?:l)?ry|earrings?|necklaces?|bracelets?|pendants?|rings?)\\b", "attributes": ["color", "material"]},
+    "accessories": {"query": "\\b(hats?|sunglasses|watches|watch bands?|watch straps?|scarves|belts?|headbands?)\\b", "attributes": ["color", "size", "material"]},
+    "other": {"query": ""}
+  },
+  "attributes": {
+    "weight_g": {"type": "number", "unit": "g", "min": 1, "max": 50000, "all_categories": true},
+    "ram_gb": {"type": "number", "unit": "GB", "min": 1, "max": 1024, "rules": [{"operator": "gte", "pattern": "\\b(?P<value>\\d{1,4})\\s*gb(?:\\s+of)?\\s+(?:ram|memory)\\b"}]},
+    "refresh_rate_hz": {"type": "number", "unit": "Hz", "min": 1, "max": 1000, "rules": [{"operator": "gte", "pattern": "\\b(?P<value>\\d{2,3})\\s*hz\\b"}]},
+    "color": {"type": "text", "metadata": ["Color", "Colour"], "rules": [{"operator": "eq", "pattern": "\\b(?P<value>black|white|beige|navy|gray|grey|brown|cream|ivory|red|blue|green|pink|silver|gold|purple|yellow|orange)\\b"}], "aliases": {"grey": "gray"}},
+    "shoe_size_us": {"type": "number", "unit": "US", "min": 0, "max": 22, "metadata": ["US Shoe Size", "US Size"], "rules": [{"operator": "eq", "pattern": "\\b(?:us(?:\\s+size)?|size\\s+us)\\s*(?P<value>\\d{1,2}(?:\\.\\d+)?)\\b"}, {"operator": "eq", "pattern": "(?<!eu )(?<!uk )\\bsize\\s+(?P<value>\\d{1,2}(?:\\.\\d+)?)(?![.\\d]|\\s*(?:eu|uk)\\b)"}]},
+    "size": {"type": "text", "metadata": ["Size"], "rules": [{"operator": "eq", "pattern": "\\bsize\\s+(?P<value>xxs|xs|s|m|l|xl|xxl|xxxl|small|medium|large)\\b"}], "aliases": {"small": "s", "medium": "m", "large": "l"}},
+    "material": {"type": "set", "metadata": ["Material", "Fabric Type", "Outer Material"], "rules": [{"operator": "contains_any", "pattern": "\\b(?P<value>cotton|leather|linen|silk|wool|denim|polyester|nylon|suede|canvas|stainless steel|sterling silver)\\b"}]}
+  }
+}

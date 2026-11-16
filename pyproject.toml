@@ -22,7 +22,7 @@ vision = ["torch>=2.5", "transformers>=4.49", "pillow>=11"]
 include = ["shopping_agent*"]
 
 [tool.setuptools.package-data]
-shopping_agent = ["demo.html"]
+shopping_agent = ["demo.html", "attributes.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

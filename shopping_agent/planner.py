@@ -6,6 +6,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 
+from .attributes import active_conditions
 from .core import Fault, elapsed_ms, stable_id
 from .platform import Quote
 
@@ -27,26 +28,24 @@ def specification(item, field):
     return value, None
 
 
-def candidate_rejection(item, goal, *, excluded=None, allowed_skus=None):
+def candidate_rejection(item, goal, *, excluded=None, allowed_skus=None, conditions=None):
     sku = item.get("sku_id")
     if not sku:
         return "unverified_sku"
     if sku == excluded or (allowed_skus is not None and sku not in allowed_skus):
         return "sku_excluded"
     category = item["category"]
-    ceiling = goal.get("max_weights", {}).get(category)
-    if ceiling is not None:
-        weight, reason = specification(item, "weight_g")
-        if reason or type(weight) is not int:
-            return reason or "unverified_weight_g"
-        if weight > ceiling:
-            return "weight_limit"
-    if category == "laptop" and goal.get("min_ram"):
-        memory, reason = specification(item, "ram_gb")
-        if reason or type(memory) is not int:
-            return reason or "unverified_ram_gb"
-        if memory < goal["min_ram"]:
-            return "min_ram"
+    for condition in active_conditions(goal, category) if conditions is None else conditions:
+        if not condition.required:
+            continue
+        value, reason = specification(item, condition.attribute)
+        matched = condition.matches(value)
+        if reason or matched is None:
+            return reason or f"unverified_{condition.attribute}"
+        if not matched:
+            return {"ram_gb": "min_ram", "weight_g": "weight_limit"}.get(
+                condition.attribute, f"constraint_{condition.attribute}",
+            )
     needs_dock = category == "dock" and (goal.get("hz") or goal.get("ports") or "laptop" in goal["categories"])
     if needs_dock:
         inputs, reason = specification(item, "inputs")
@@ -141,16 +140,29 @@ class Planner:
     def _pools(self, goal, queries, fixed, visual, limit, excluded, allowed_skus):
         def fetch(category):
             unverified = []
+            conditions = active_conditions(goal, category)
 
             def reject(item):
-                reason = candidate_rejection(item, goal, excluded=excluded.get(category), allowed_skus=allowed_skus)
+                reason = candidate_rejection(item, goal, excluded=excluded.get(category), allowed_skus=allowed_skus,
+                                             conditions=conditions)
                 if reason and reason.startswith(("unverified_", "conflicting_")):
-                    unverified.append(item)
+                    unknown = [condition.attribute for condition in conditions if condition.required and (
+                        not item.get("sku_id") or specification(item, condition.attribute)[1]
+                    )]
+                    if reason == "unverified_sku" and (goal.get("budget") or goal.get("deadline")):
+                        unknown.append("offer")
+                    if not unknown:
+                        unknown = [reason.split("_", 1)[1]]
+                    unverified.append({**item, "unverified_fields": unknown})
                 return reason
+
+            def prefer(item):
+                return sum(condition.matches(specification(item, condition.attribute)[0]) is True
+                           for condition in conditions if not condition.required)
 
             fixed_item = fixed.get(category)
             if fixed_item:
-                item = self.catalog.store.get("catalog", fixed_item["sku_id"])
+                item = self.catalog.get("catalog", fixed_item["sku_id"])
                 if not item or not item.get("active"):
                     return [], {"rejected": [{"id": fixed_item["sku_id"], "reason": "inactive_sku"}]}, []
                 reason = reject(item)
@@ -166,7 +178,8 @@ class Planner:
             docs, trace = self.catalog.search(extra or terms, None if category == "other" else category,
                                               alternates=alternate or ([terms] if extra else ()), limit=limit,
                                               pool=max(15, limit*2),
-                                              visual=visual if len(goal["categories"]) == 1 else None, reject=reject)
+                                              visual=visual if len(goal["categories"]) == 1 else None, reject=reject,
+                                              review_query=goal.get("experience_query"), prefer=prefer)
             return docs, trace, unverified
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -235,7 +248,8 @@ class Planner:
     @staticmethod
     def _public(doc):
         return {k: doc.get(k) for k in ("id", "sku_id", "product_id", "title", "brand", "category", "variant",
-                                       "source", "snapshot_price", "snapshot_currency", "rating", "images")}
+                                        "source", "snapshot_price", "snapshot_currency", "rating", "images",
+                                        "attributes", "unverified_fields", "external_asin")}
 
     def _pairs(self, slots, goal, fixed, rejected):
         choice = ranking_preference(goal)

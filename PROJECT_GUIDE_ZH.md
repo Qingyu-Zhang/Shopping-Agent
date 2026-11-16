@@ -89,7 +89,8 @@ flowchart LR
 | 存储域 | 逻辑分组 | 内容 |
 |---|---|---|
 | Agent 任务 | `tasks`、`task_views`、`runs`、`preferences` | 当前目标和方案、历史版本、轮次状态与 SSE 事件、账户偏好 |
-| Agent 目录 | `products`、`catalog`、`evidence`、`vectors` | 商品组、搜索文档、评论证据、按内容和模型复用的文档向量 |
+| 平台目录 | `products`、`catalog`、`evidence` | 商品组、SKU 和评论原文。索引和命中回查都用只读目录连接 |
+| Agent 检索缓存 | `vectors` | 按模型和片段文本复用的文档向量。兼容读取演示目录和早期导入记录 |
 | Agent 交易 | `quotes`、`checkouts`、`return_quotes`、`return_results` | 确认收据、待对账及已完成的购买、退货确认和结果 |
 | Agent 自动化 | `automations`、`watch_offers`、`automation_runs`、`received_offer_events`、`notices` | 授权条件、Offer 反查索引、周期执行记录、事件去重、站内通知 |
 | Agent 审计 | `audit` | 轮次完成、确认下单、退货以及自动化授权和执行记录 |
@@ -112,7 +113,7 @@ LangGraph checkpoint 保存**执行位置和图状态**。`task_views` 保存**�
 4. 配置 Chat 模型时，`understand()` 先完成规则解析，再要求模型返回符合 `Patch` 的 JSON，用其结果补充结构字段。解析失败时保留规则结果。`route()` 根据缺失信息和意图选择澄清、研究或直接处理。
 5. 研究节点可运行只读 Function Calling，随后 `resolve()` 进行真正的组合检索、平台核价和证据读取。查询订单会直接向平台查当前账户的订单；检测到加购、结算或提醒意图时，可以生成 `suggested_action`，由客户端再调用对应接口。
 6. `Runs._commit()` 检查任务是否仍是运行开始时的 `base_version`。匹配时递增任务版本，保存当前任务、历史快照、运行结果和审计。若另一个客户端已更新版本，则本轮以 `task_conflict` 结束，避免迟到的结果覆盖新状态。
-7. 客户端可以轮询 `GET /v1/runs/{run_id}`，也可以订阅 SSE。`Last-Event-ID` 用于从已收到的序号之后继续读。每个运行保留最近 40 条状态事件，终态事件可携带结果、追问或错误。当前 demo 使用按运行 ID 轮询。
+7. 演示页面通过 SSE 接收检索进度、单条推荐理由和最终结果。`Last-Event-ID` 用于断线续接，每个运行保留最近 40 条事件。终态可以携带结果、追问或错误。客户端也可以轮询 `GET /v1/runs/{run_id}`。
 
 ```mermaid
 flowchart TD
@@ -131,7 +132,7 @@ flowchart TD
 
 ### 模型能调用的工具
 
-`research()` 最多请求两轮模型工具调用，每轮最多处理三个工具。`search_products` 只能在任务允许的品类范围检索，回收每个品类最多两个不同的查询改写。`get_product_evidence` 只能查本次工具研究中已经见过的 `product_id`。参数由 `Search` 或 `Evidence` 校验，每次工具结果的传回文本也有长度限制。工具轨迹只记录工具名和是否成功。下单、购物车写入与自动化写入由服务端业务 API 控制，模型直接提出类似 `commerce_submit` 的工具调用会被拒绝。
+多品类搜索最多跑两轮只读工具研究，单品类优先直接搜索，候选少时可以补查一轮。每轮最多处理三个工具。`search_products` 按任务品类检索并保存查询改写。`get_product_evidence` 只能查本次工具研究中已经见过的 `product_id`。参数和调用范围由后端校验。下单、购物车和自动化由独立业务接口执行。
 
 ## 4. 商品检索、组合与证据
 
@@ -144,6 +145,7 @@ flowchart TD
 | 关键词 | Elasticsearch 在 `title^4`、`brand^2`、`variant^2`、`text` 上做 `multi_match`，用英文分析器，并对 `search_terms` 的命中加权。`tokens()` 保留形如 `USB-C`、`4K@60Hz` 的复合 token，并归一化少量英文同义词 |
 | 文本向量 | `Models.embeddings()` 生成查询向量，通过 `dense_vector` 的 `knn` 召回。索引显式配置 `hnsw` 与余弦相似度，`num_candidates` 按候选目标的四倍配置、最多 1,000 |
 | 图片向量 | 装有可选依赖、配置 `CLIP_MODEL`、重建时提供本地商品图片，且请求包含图片或外观词时生成 CLIP 查询向量。在规划器中当前仅用于单品类搜索 |
+| 评论召回 | 体验类请求先从评论片段召回相关商品。每个父商品在评论通道占一个排名位置，候选阶段可用相符评论辅助精排 |
 | 融合与精排 | 先融合相同通道的改写结果，再做 RRF。购买方案的候选在回读目录后先校验单品硬条件。若配置 `RERANK_URL`，将通过检查的候选交给外部接口精排，否则沿用其融合排名 |
 
 RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，每个结果列表按文档 ID 去重。搜索服务回读数据库中的文档，再按当前任务检查其资格。`trace.search` 给出各召回路、`fused`、`rejected`、`shortlist` 及阶段耗时。检索文本包含具体 SKU ID。在 Elasticsearch 模式，语义路失败时可保留关键词排名，关键词服务不可用时返回 `search_unavailable`。本机模式直接扫描小目录，在 Python 中算 BM25 和向量相似度。
@@ -162,7 +164,7 @@ RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，�
 [`planner.py`](shopping_agent/planner.py) 实际交付的是在当前业务约束下可买的**方案**，而不是只按文本相关性列商品。
 
 1. `_pools()` 为各购买槽位并行取候选。固定的 SKU 会直接从目录读取，候选不足时整轮从每槽位 10 扩至 22。
-2. `candidate_rejection()` 在精排前校验 SKU、最小内存、明确重量上限和可独立判断的视频能力。缺少可信规格或存在冲突的条目可进入研究卡片，并带着可诊断的原因排除在购买方案之外。
+2. `candidate_rejection()` 在精排前按 [属性定义](shopping_agent/attributes.json) 校验同一 SKU 的必选属性。配置定义值类型、单位、适用品类和匹配方式的基础信息。范围、等值和集合筛选复用同一比较器，软偏好影响排序。缺少可信变体属性时，商品可以进入研究结果并标明待确认字段。
 3. `find()` 批量向平台获取候选 SKU 的 Offer，处理库存、USD 币种及自动化卖家授权限制。每个 SKU 按价格、送达时效和 ID 留最多三个 Offer。历史方案固定项会继续绑定原 Offer。
 4. `compatibility()` 从具体笔记本 SKU、用户明确声明的主机能力或澄清取得视频协议和级别，核对扩展坞输入要求与目标接口上的 4K 刷新率。若购买显示器，它的接口也进入校验。成功结果包含带来源和版本的规格证据。只有显示器规格时，系统会追问主机能力。
 5. `_pairs()` 用估算成本和用户偏好限制核价规模。`_price()` 并行获取最多 22 组平台报价，校验实际总价、最晚到货时间、Offer 和 SKU 绑定。通过校验的方案按 `sort_by` 排序，价格和送达依据实时报价，轻便模式优先可信重量。最后按 SKU 组合去重并展示最多三套。
@@ -175,7 +177,7 @@ RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，�
 
 可买方案的`规格、价格和到货`来自规则和平台结果。`describe()` 用这些数据生成英文摘要。对入选商品，`Catalog.evidence()` 在相应商品组的评论中检索证据；若当前只有研究条目，也可以返回这些条目的评论。
 
-可用模型会挑选最多三个评论原文摘录。`highlights()` 检查证据 ID 存在、摘录长度合法且原文包含该段逐字文本。摘录保留证据来源，反映评论者的体验。模型请求失败时使用检索到的短摘录。规格结论和商品评论在结果中分字段呈现。
+短评论整条索引，长评论和目录详情按边界切成片段。命中后从目录读取原始记录，每条引用保留来源和评论变体。推荐提示词收到最多三件候选或三个方案的规格、实时报价和各自的证据。模型以 JSONL 逐条输出理由和引用，服务端核验候选、证据归属及摘录后发布 SSE。模型失败时用目录或评论原文回退。单独追问尺码感受等评论问题时，流程先定位该商品再取评论。
 
 ## 5. HTTP 与 MCP 平台接入
 
@@ -281,7 +283,7 @@ sequenceDiagram
 
 ## 8. Amazon Reviews’23 与评估
 
-[`dataset.py`](shopping_agent/dataset.py) 适配原始和导出后的 JSONL，也能流式解压 `.gz`。默认最多选择 1,000 个唯一商品组，每组最多尝试导入 20 条评论，按输入顺序形成可重放的子集。读取和写入按批次完成，导入会返回商品数、评论新增数和遇到的无效或范围外记录统计。
+[`dataset.py`](shopping_agent/dataset.py) 适配原始和导出后的 JSONL，也能流式解压 `.gz`，以批量语句写入 `PLATFORM_DATABASE`。默认按文件顺序最多选 1,000 个商品，每组保留至多 20 条评论。用 `--parent-asins` 可指定 ASIN 清单，用 `--demo-offers` 可另外载入明确标注的模拟 SKU 和报价。索引器和搜索结果回查使用 `CATALOG_DATABASE` 指向的平台只读连接。
 
 | 源字段 | 导入后的作用 |
 |---|---|
@@ -296,9 +298,9 @@ sequenceDiagram
 
 导入商品的 `sku_id` 保持为空，`specs` 也为空。它们可以被搜索和引用。只有平台目录中的 SKU 和可买 Offer 能进入实际成交方案。导入并重建索引后，就可以用公开数据测英文召回与评论证据，用可控的平台种子验证精确兼容性、实时库存与交易故障。字段依据见 [Amazon Reviews’23 数据集](https://amazon-reviews-2023.github.io/#data-fields)。
 
-`evaluate` 消费 `fixtures/search_cases.jsonl` 形式的标签。每行提供 `query`、可选 `category`、以及标注为相关的文档 ID 数组 `relevant`。输出每条查询的排名、关键词与语义通道的候选、Recall@K 和倒数排名，还输出均值与 MRR。默认有三条合成目录检索用例。正式评估可换成带英文查询和人工相关性标注的样本。
+`evaluate` 读取查询、可选类目和文档或商品 ID 的相关性标注。`relevant` 支持二元标注，`relevance` 也可按 ID 指定 0–3 的相关性等级。报告包含 Recall@K、MRR、NDCG@K、评论证据关键词命中率和 p95 延迟。同一商品的重复命中只为 NDCG 计一次增益，没有正相关标注的查询不计入平均 NDCG。`fixtures/fashion_search_cases.jsonl` 是固定 Amazon Fashion 样本的英文用例。可以重复传入 `--mode text --mode review --mode clip --mode vlm` 对比各路，并查看视觉通道是否实际参与。
 
-`evaluate-journeys` 在独立的临时数据库回放 `fixtures/shopping_journeys.jsonl`。它记录意图准确率、约束提取准确率、Top K 合格组合命中率、已标注硬条件通过率、多轮保留率，以及整轮与各阶段的 p50/p95。合格组合命中率只统计标有可行组合的轮次，结果为空计为未命中。默认 20 个英文场景覆盖 28 轮，耗时来自本机演示数据。`--with-models` 可以测现有模型配置，评估仍使用独立种子数据。
+`evaluate-journeys` 在独立的临时数据库回放 `fixtures/shopping_journeys.jsonl`。默认 109 个英文场景覆盖 131 轮，涉及设备兼容、服饰变体、库存和运费、配送时间、评论证据与多轮修改。断言可以核对首位组合、Offer、报价和评论 ID。指标包括意图与约束提取准确率、Top K 合格组合命中率、硬条件满足率、多轮保留率，以及整轮与各阶段的 p50/p95。服饰模拟数据来自同名的 `.catalog.json` 文件，库存和运费变化仅在各自的场景内生效。`--with-models` 可以继续用同一批标注测试现有模型配置。
 
 ## 9. API 速查
 
@@ -337,7 +339,7 @@ sequenceDiagram
 | 文件 | 类和函数 | 阅读要点 |
 |---|---|---|
 | [`__init__.py`](shopping_agent/__init__.py) | 包定义 | 标识 `shopping_agent` Python 包 |
-| [`__main__.py`](shopping_agent/__main__.py) | `main()`、`evaluate()` | 加载环境配置和日志，分发服务、索引、导入及两类评估命令。单品评估调用实际目录入口并计算 Recall 与 MRR |
+| [`__main__.py`](shopping_agent/__main__.py) | `main()`、`evaluate()` | 加载环境配置和日志，分发服务、索引、导入及两类评估命令。单品评估调用实际目录入口并计算 Recall、MRR 和 NDCG |
 | [`evaluation.py`](shopping_agent/evaluation.py) | `evaluate_journeys()`、`_run_cases()`、`_grade_turn()` | 在独立数据库回放英文任务，按标签验证约束、保留项和合格组合，汇总阶段耗时 |
 | [`core.py`](shopping_agent/core.py) | `Settings.from_env()`、`Fault`、`Input`、`Line` | 环境变量、业务错误和统一输入类。`Input` 去掉字符串首尾空白并拒绝多余字段 |
 | 同上 | `normalize_lines()`、`new_id()`、`stable_id()`、`timestamp()`、`iso()`、`cash()` | 标准化 Offer 行，生成随机或可重放的 ID，统一时间和美元字符串 |
@@ -509,7 +511,7 @@ $result | ConvertTo-Json -Depth 12
 ## 12. 当前实现边界与排查
 
 - **交易与履约。** 当前平台是 sandbox。真实支付、税费、优惠、配送和退款需要由接入的平台提供，平台适配器需遵守稳定操作 ID 与报价一致性契约。演示站内通知是 `notices` 记录。
-- **接入的模型。** 无模型配置时可跑英文规则、BM25 与演示向量。工具调用测试通过模拟兼容 HTTP 响应验证，真实 Chat、embedding、外部精排与 CLIP 仍需按实际模型服务联调。VLM 与 IVF 属于后续评估。
+- **接入的模型。** 无模型配置时可跑英文规则、BM25、演示向量和带引用的推荐回退。CLIP 需要本地图片和模型权重。可用 `VISION_CHAT_MODEL` 启用多模态精排，并用固定样本对照文本、评论和图片召回。真实服务的质量、延迟和成本以实测为准。
 - **目录。** 组合规划适合当前的按品类槽位、规格与数量为 1 的推荐，显式购买行可指定数量。未知目录规格会影响可买方案。Reviews’23 带来的商品组没有现成的官方 SKU 与 Offer 映射。索引更新由导入及重建操作驱动。
 - **部署与鉴权。** 当前 Compose 是面向本地验证的单节点配置。`DEMO=1` 时凭固定令牌选择演示账户。`DEMO=0` 时 API 启动要求 `AUTH_JWT_SECRET` 至少 32 字符，并使用配置的颁发者和 audience 验证账户令牌。`/health` 检查存储依赖，平台和模型的实际可用性在对应业务调用中体现。
 - **版本与恢复。** 任务版本冲突时先读 `GET /v1/tasks/{task_id}`。若用户指的是旧卡片，传该卡的 `plan_version`。结算 `processing` 时一直查询原 `attempt_id`。新的金额应通过替代收据重新确认。

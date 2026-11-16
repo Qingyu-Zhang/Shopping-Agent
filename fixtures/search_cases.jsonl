@@ -1,3 +1,3 @@
-{"query":"light travel USB-C dock HDMI 4K 60Hz","category":"dock","relevant":["link-nano","link-mini","link-pro"]}
-{"query":"lightweight business laptop for commuting","category":"laptop","relevant":["air-16","cedar-16"]}
+{"query":"light travel USB-C dock HDMI 4K 60Hz","category":"dock","relevance":{"link-nano":3,"link-mini":2,"link-pro":1,"link-lite":0}}
+{"query":"lightweight business laptop for commuting","category":"laptop","relevance":{"cedar-16":3,"air-16":2}}
 {"query":"Fresh 300 compatible replacement air filter","category":"filter","relevant":["fresh300"]}

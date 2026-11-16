@@ -1,6 +1,6 @@
 # Shopping Agent V2
 
-An English-language shopping backend. FastAPI exposes versioned shopping tasks, catalog research, cart, checkout, orders, returns and price automation. LangGraph orchestrates the research turn. The platform sandbox exposes the same commerce contract over HTTP and MCP Streamable HTTP. The browser demo exercises the API.
+An English-language shopping backend. FastAPI exposes versioned shopping tasks, catalog research, cart, checkout, orders, returns and price automation. LangGraph orchestrates hybrid retrieval, SKU filtering and recommendations with cited evidence. The platform sandbox exposes commerce tools over HTTP and MCP Streamable HTTP. The browser demo streams progress and recommendations.
 
 ## Run on Windows
 
@@ -18,62 +18,68 @@ Try “Find a lightweight laptop and a dock that can drive a 4K 60 Hz monitor, u
 
 ## Run the service stack
 
+Start Docker Desktop and run these commands from the project directory. Use `--build` after a source update to rebuild the application images.
+
 ```powershell
 docker compose up --build -d
-docker compose ps
+docker compose ps -a
 ```
 
-The API listens on port 8000. The sandbox exposes Swagger at port 8001 and MCP at `/mcp`. Compose runs PostgreSQL, Redis, Elasticsearch, an index build, the FastAPI app and a separate Worker. The Agent and sandbox have separate databases. The API connects to the sandbox via MCP and receives offer events over the authenticated internal endpoint. PostgreSQL, Redis and Elasticsearch use the private Compose network.
+Open [the demo](http://127.0.0.1:8000/) when the API and Worker are running. The `indexer` runs once and exits with code 0 after a successful build. The sandbox exposes Swagger at port 8001 and MCP at `/mcp`. PostgreSQL holds separate Agent and platform databases. The indexer and Agent read the platform catalog, and the Agent calls the sandbox over MCP for commerce operations. PostgreSQL, Redis and Elasticsearch use the private Compose network.
 
 ```powershell
 docker compose logs api worker platform
 docker compose stop
 ```
 
-Compose and the demo use test credentials. A non-demo deployment uses `DEMO=0`, JWTs from a trusted issuer, a platform sandbox or service URL, separate secrets, and secure infrastructure. Automatic buying is enabled explicitly with `AUTOBUY_ENABLED=1`. `CHECKOUT_ENABLED=0` pauses new checkout and return confirmations while previously accepted checkout attempts continue reconciliation.
+`docker compose stop` preserves the PostgreSQL and Elasticsearch data volumes. The supplied Compose stack runs in demo mode with test credentials. A non-demo deployment configures `DEMO=0`, JWTs from a trusted issuer, a platform service, separate secrets and secure infrastructure. Automatic buying is enabled explicitly with `AUTOBUY_ENABLED=1`. `CHECKOUT_ENABLED=0` pauses new checkout and return confirmations while previously accepted checkout attempts continue reconciliation.
 
 ## Configure models
 
-Copy `.env.example` to `.env` as needed. Set `MODEL_URL` to a compatible API base URL including `/v1`, then set `CHAT_MODEL` and `MODEL_KEY` as required. Open-ended turns use a structured intent prompt, bounded read-only function calls, and a grounded review-excerpt prompt. The service validates tool arguments and verifies that cited excerpts exist in the cited evidence. It renders prices, delivery and verified compatibility from structured service results.
+Copy `.env.example` to `.env` as needed. Set `MODEL_URL` to a compatible API base URL including `/v1`, then set `CHAT_MODEL` and `MODEL_KEY`. Shopping turns use structured intent extraction and bounded read-only tools for complex or sparse searches. The model streams explanations for up to three candidates, and the service verifies candidate IDs and verbatim citations before publishing each recommendation as an SSE event. The demo can also display recommendations assembled directly from available evidence. Compatibility checks use catalog specifications, while prices and delivery estimates come from platform quotes.
 
 Set `EMBEDDING_MODEL` with an embeddings endpoint to use semantic text vectors. Set `RERANK_URL` and `RERANK_MODEL` for a `POST /rerank` service returning indexed relevance scores. Local defaults use English parsing, BM25 and a deterministic demo vector. The fallback supports the built-in scenarios and regression tests. Real models are configurable.
 
-Elasticsearch uses separate aliases for SKU search and review evidence. Keyword and dense-vector searches run in parallel and RRF fuses their ranks. The bundle planner checks known SKU requirements before optional reranking and shortlisting, including RAM, weight, dock output and host capability. It checks the selected products together, then validates platform quotes against the budget and delivery deadline. Final ordering uses quoted totals and arrival times with the user's price, weight or delivery preference. Index mappings specify English text analysis and HNSW. Run the index command after catalog changes or to include SKU identifiers in an existing index. The command bulk-writes both new indices before switching their aliases.
+Elasticsearch serves separate catalog and review passage indices. Keyword and dense-vector searches run in parallel. For experience-focused requests, review passages can introduce products into the RRF ranking. Short reviews stay intact, and passages from longer reviews retain a reference to the original record. The planner checks required attributes on the same SKU using [the catalog schema](shopping_agent/attributes.json). Equality, ranges and set matching share the same filtering mechanism. Rebuild the indices after catalog or embedding changes.
 
-For visual search, install `.[vision]`, set `CLIP_MODEL`, and reindex with `--images PATH`. Supply local images named by catalog document ID with a JPEG, PNG or WebP extension. Specific appearance requests or an `image_base64` turn field can trigger the optional image route. VLM reranking and IVF comparisons are future evaluation work.
+For CLIP retrieval, install `.[vision]` locally or rebuild Compose with `INSTALL_VISION=1`. Set `CLIP_MODEL` and `CATALOG_IMAGES`, then reindex with Elasticsearch enabled. Image files use catalog document IDs and JPEG, PNG or WebP extensions. `prepare-images --images PATH` can cache a bounded set of primary Amazon images. Appearance requests and reference images can add CLIP retrieval. Set `VISION_CHAT_MODEL` to a vision-capable model on the same provider to enable optional reranking of a small set of candidates with images. In Compose, use `CATALOG_IMAGES=/catalog-images`.
 
 ## Import Amazon Reviews’23
 
-The importer accepts local JSONL and gzip-compressed JSONL. It streams records and keeps a bounded, repeatable subset in file order. It recognizes the raw and exported metadata layouts, including structured and serialized details, both image layouts, nullable USD snapshot prices, and review timestamp and helpful-vote aliases.
+The importer accepts JSONL or gzip-compressed JSONL and batch-writes into `PLATFORM_DATABASE`. `CATALOG_DATABASE` can specify a separate connection for read-only catalog access. Both indexing and search-result hydration read the platform catalog. Demo records and earlier Agent imports remain readable for compatibility.
 
 ```powershell
 .\.venv\Scripts\python.exe -m shopping_agent import-reviews23 --metadata .\fixtures\reviews23_meta.jsonl --reviews .\fixtures\reviews23_reviews.jsonl
 .\.venv\Scripts\python.exe -m shopping_agent evaluate
 ```
 
-The fixture files are synthetic examples of the schemas. To use real data, pass the downloaded metadata and review files, optionally with `--products 1000 --reviews-per-product 20`. In Compose, mount the data directory into the indexer:
+The examples above use synthetic files. With the official files in `dataset/`, the following Compose commands import a fixed 23-product Amazon Fashion sample into PostgreSQL and rebuild the search indices. The optional demo offer file adds four simulated SKU variants with prices and inventory. To import a larger file-order sample, omit the manifest and demo offer options and set `--products` and `--reviews-per-product`.
 
 ```powershell
-$datasetPath = (Resolve-Path -LiteralPath '.\fixtures').Path
-docker compose run --rm --volume "${datasetPath}:/import:ro" indexer import-reviews23 --metadata /import/reviews23_meta.jsonl --reviews /import/reviews23_reviews.jsonl
+$datasetPath = (Resolve-Path -LiteralPath '.\dataset').Path
+docker compose build indexer
+docker compose run --rm --volume "${datasetPath}:/import:ro" indexer import-reviews23 --metadata /import/meta_Amazon_Fashion.jsonl --reviews /import/Amazon_Fashion.jsonl --parent-asins fixtures/fashion_parent_asins.txt --reviews-per-product 16 --demo-offers fixtures/fashion_demo_offers.jsonl
 docker compose run --rm indexer reindex
-docker compose run --rm indexer evaluate
+docker compose run --rm indexer evaluate --cases fixtures/fashion_search_cases.jsonl --k 3 --mode text --mode review
 ```
 
-Metadata and reviews join on `parent_asin`. A child review ASIN remains a source reference. Imported dataset products can appear in research results and reviews, with USD snapshot prices labeled separately. Exact SKU compatibility and purchasable offers use the platform catalog and quote contract. Supply English relevance labels in the JSONL search-case format to evaluate a different catalog subset. [Dataset fields and examples](https://amazon-reviews-2023.github.io/#data-fields)
+Metadata and reviews join on `parent_asin`, and review citations retain the child ASIN. Imported listings show historical USD prices when present. The checkout planner requires verified SKU attributes and a live platform offer. Evaluation reports Recall@K, MRR, NDCG@K, evidence term matches and p95 latency. With visual models and images configured, append `--mode clip --mode vlm` to compare visual retrieval and reranking on the same queries. [Dataset fields and examples](https://amazon-reviews-2023.github.io/#data-fields)
+
+After importing the sample and its simulated offers, try “Find black shoes in US size 8 under $60.” For a review question, try “How do Bandolino BERTA platform pumps fit? Do reviewers say they run small?”
 
 ## Start with the API
 
 | Operation | Entry point |
 |---|---|
 | Research and refinement | `POST /v1/tasks`, then `POST /v1/tasks/{task_id}/turns`. Include `expected_version` and the displayed `plan_version` for edits. |
-| Progress and clarification | `GET /v1/runs/{run_id}` or `GET /v1/runs/{run_id}/events` with optional `Last-Event-ID`. Reply to a pending interruption at `POST /v1/runs/{run_id}/clarification`. |
+| Progress and clarification | `GET /v1/runs/{run_id}` returns the run. `GET /v1/runs/{run_id}/events` streams progress and recommendations and supports `Last-Event-ID`. Reply to a pending clarification at `POST /v1/runs/{run_id}/clarification`. |
+| Catalog and review evidence | `GET /v1/catalog/search` and `GET /v1/products/{product_id}/evidence`. The Agent uses these catalog capabilities through its own read-only research tools. |
 | Task trace | `GET /v1/tasks/{task_id}/trace` lists account-scoped events from research through a cart change, quote and checkout linked to a selected plan. The run result includes stage timings and candidate rejection reasons. |
 | Compare, cart and checkout | The run or task includes structured plans. Submit the selected plan and its version to `/v1/cart/changes` or `/v1/quotes`. Confirm a quote by posting its exact `terms` value to `/v1/quotes/{id}/confirm`, then poll the checkout attempt. |
 | Order and returns | `GET /v1/orders` shows per-seller parcels. Preview a return on the delivered line, then confirm the preview and reason. |
 | Price tracking and replenishment | `POST /v1/automations` binds exact offers or a saved search to a price, stock or schedule trigger. Search-based cart and purchase rules require explicitly allowed SKUs and sellers. Read the rules and execution history, revoke rules, and see in-app notices. |
 
-For a separate platform process over HTTP set `PLATFORM_URL=http://127.0.0.1:8001`. For MCP use `PLATFORM_URL=http://127.0.0.1:8001/mcp` and `PLATFORM_TRANSPORT=mcp`. Both use the authenticated tool names exposed by the sandbox. A real platform adapter must validate the account and quote, support stable operation IDs and allow querying the original checkout attempt after a timeout.
+For a separate platform process over HTTP, set `PLATFORM_URL=http://127.0.0.1:8001`. For MCP, use `PLATFORM_URL=http://127.0.0.1:8001/mcp` and `PLATFORM_TRANSPORT=mcp`. The platform registers 12 commerce tools covering accounts, offers, price history, quotes, cart, checkout, orders and returns. For imported products, point `CATALOG_DATABASE` at the platform catalog when running the Agent separately. A platform adapter must validate the account and quote, support stable operation IDs and allow querying the original checkout attempt after a timeout.
 
 ### Failure drills
 
@@ -84,8 +90,11 @@ In local mode the Agent exposes demo controls under `/demo`. In Compose the sand
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m shopping_agent evaluate-journeys
+.\.venv\Scripts\python.exe -m shopping_agent evaluate --k 3
 ```
 
-The tests exercise the HTTP API, English bundle edits, SQLite checkpoint recovery, provider-style tool calling, strict quote confirmation, lost payment recovery, account isolation, cart and return idempotency, background authorization and deduplication, Reviews’23 ingestion, and the real MCP transport over loopback. The separate Compose stack is the PostgreSQL, Elasticsearch and Redis integration path.
+The tests cover HTTP and MCP, bundle refinements, checkpoint and payment recovery, quote confirmation, cart and return idempotency, and authorized automation. Catalog tests cover Reviews’23 ingestion, SKU filtering, review passages, verified streaming recommendations and ranking metrics. The Compose stack provides the integration path for PostgreSQL, Elasticsearch and Redis.
 
-`evaluate-journeys` replays 20 labeled English shopping journeys in temporary seeded databases. It reports intent and constraint extraction, eligible bundle hit rate, returned-plan constraint satisfaction, preservation of earlier constraints and selected offers, and p50/p95 timings. It exits with a nonzero status when a labeled check fails. Use `--cases` to supply compatible labels and `--with-models` to exercise configured model services. The default run uses deterministic demo data and model fallbacks.
+`evaluate-journeys` replays 109 labeled English shopping journeys across 131 turns in temporary databases. Cases cover typed SKU constraints, connector compatibility, stock and shipping changes, delivery deadlines, review evidence and multi-turn refinements. The report includes intent and constraint accuracy, eligible bundle hit rate, returned-plan constraint satisfaction, multi-turn retention and p50/p95 timings. Case labels can also check the first-ranked SKU bundle, exact offers, quoted totals and expected review IDs. The default run uses seeded electronics and simulated fashion fixtures. Use `--cases` to select a case file and `--with-models` to exercise configured model services. A failed check produces a nonzero exit status.
+
+`evaluate` accepts binary relevance through `relevant` or graded relevance through a `relevance` map. Use grades 0–3 from irrelevant to highly relevant, and label either document IDs or product IDs consistently within each query. The report includes `ndcg` per query and `mean_ndcg` at the requested `--k`. Repeated hits for the same judged product earn credit once. Queries with no positive judgments are excluded from the mean.

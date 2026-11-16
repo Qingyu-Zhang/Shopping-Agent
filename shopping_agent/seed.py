@@ -27,7 +27,7 @@ ITEMS = (
      {"weight_g": 58, "inputs": {"dp_alt": {"min": 14, "outputs": {"hdmi": 60}}}},
      "Very light travel USB-C dock for 4K 60Hz HDMI monitors."),
     ("vista-27", "vista", "Vista 27 Monitor", "Vista", "monitor", "Black", 24900,
-     {"weight_g": 5260, "monitor_ports": ["hdmi", "dp"]}, "External 4K 60Hz monitor."),
+     {"weight_g": 5260, "monitor_ports": ["hdmi", "dp"], "refresh_rate_hz": 60}, "External 4K 60Hz monitor."),
     ("fresh300", "fresh", "Fresh 300 Air Filter", "Fresh", "filter", "One pack", 1599,
      {"compatible_with": ["Fresh 300"]}, "Replacement air purifier filter for periodic replenishment."),
     ("tuna-cat", "tuna", "Ocean Tuna Cat Food", "Ocean", "pet_food", "1.5 kg", 1999,
@@ -54,7 +54,7 @@ def seed_catalog(store):
                 "category": cat, "variant": variant, "snapshot_price": amount, "specs": specs,
                 "source": "Demo manufacturer catalog", "source_version": "1",
                 "description": description, "market": "US", "active": True,
-            }, once=True)
+            }, owner=product, once=True)
         for sku, review in (
             ("air-16", "Light enough to carry to work daily. The keyboard is comfortable."),
             ("cedar-16", "Very easy to travel with. The screen is bright."),

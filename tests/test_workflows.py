@@ -135,7 +135,8 @@ def test_tool_calls_are_executed_with_read_only_scope(api):
     ])
     runtime.models.settings = replace(runtime.settings, model_url="https://mock.test/v1", chat_model="test-tool-caller")
     def respond(request):
-        json.loads(request.content)
+        if json.loads(request.content).get("stream"):
+            return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, text="data: [DONE]\n\n")
         return httpx.Response(200, json={"choices": [{"message": next(sequence)}]})
     runtime.models.http.close()
     runtime.models.http = httpx.Client(transport=httpx.MockTransport(respond))
@@ -466,7 +467,8 @@ def test_remote_platform_rejects_malformed_business_records(config, tool, args, 
 
 def test_english_journey_benchmark():
     report = evaluate_journeys(Path("fixtures/shopping_journeys.jsonl"))
-    assert report["cases"] == 20
+    assert report["cases"] > 100
+    assert report["turns"] > report["cases"]
     assert report["failed_turns"] == 0, [row for row in report["results"] if row["failures"]]
     assert report["eligible_bundle_hit_rate"] == report["multi_turn_retention"] == 1.0
     assert report["stage_latency_ms"]["catalog_eligibility"]["n"] > 0

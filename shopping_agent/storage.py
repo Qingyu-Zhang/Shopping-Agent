@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Column, Float, Index, JSON, MetaData, String, Table, create_engine, delete, event, select
+from sqlalchemy import Column, Float, Index, JSON, MetaData, String, Table, create_engine, delete, event, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import make_url
@@ -26,11 +26,12 @@ Index("ix_records_due", records.c.bucket, records.c.state, records.c.due)
 
 
 class Store:
-    def __init__(self, url: str):
+    def __init__(self, url: str, *, read_only=False):
         url = make_url(url)
         if url.drivername == "postgresql":
             url = url.set(drivername="postgresql+psycopg")
         self.sqlite = url.get_backend_name() == "sqlite"
+        self.read_only = read_only
         options = {"pool_pre_ping": True}
         if self.sqlite:
             options["connect_args"] = {"check_same_thread": False, "timeout": 20}
@@ -43,7 +44,10 @@ class Store:
             @event.listens_for(self.engine, "connect")
             def configure(connection, _):
                 connection.execute("PRAGMA busy_timeout=20000")
-                connection.execute("PRAGMA journal_mode=WAL")
+                if self.read_only:
+                    connection.execute("PRAGMA query_only=ON")
+                else:
+                    connection.execute("PRAGMA journal_mode=WAL")
         if not self.sqlite and url.get_backend_name() != "postgresql":
             raise ValueError("Use PostgreSQL or local SQLite.")
 
@@ -56,12 +60,16 @@ class Store:
 
     @contextmanager
     def transaction(self, write=False):
+        if write and self.read_only:
+            raise ValueError("This database connection is read-only.")
         with self.engine.connect() as connection:
             if write and self.sqlite:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             else:
                 connection.begin()
             try:
+                if self.read_only and not self.sqlite:
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
                 yield Transaction(connection, self.sqlite)
                 connection.commit()
             except BaseException:
@@ -75,6 +83,19 @@ class Store:
     def list(self, bucket, owner=None, **query):
         with self.transaction() as tx:
             return tx.list(bucket, owner, **query)
+
+    def get_many(self, bucket, keys):
+        with self.transaction() as tx:
+            return tx.get_many(bucket, keys)
+
+    def catalog_for_products(self, product_ids):
+        relation = (or_(records.c.owner.in_(product_ids), records.c.key.in_(product_ids)) if self.read_only
+                    else records.c.value["product_id"].as_string().in_(product_ids))
+        query = select(records.c.value).where(
+            records.c.bucket == "catalog", relation,
+        )
+        with self.transaction() as tx:
+            return list(tx.connection.execute(query).scalars())
 
     def task_audit(self, owner, task_id, limit):
         query = select(records.c.value).where(
@@ -103,9 +124,15 @@ class Transaction:
             raise Fault("not_found", "The requested resource was not found.", 404)
         return value
 
+    def get_many(self, bucket, keys):
+        query = select(records.c.key, records.c.value).where(records.c.bucket == bucket, records.c.key.in_(keys))
+        return dict(self.connection.execute(query).all())
+
     def list(self, bucket, owner=None, *, state=None, due=None, limit=100, lock=False, after=None):
         query = select(records.c.value).where(records.c.bucket == bucket)
-        if owner is not None:
+        if isinstance(owner, (list, tuple)):
+            query = query.where(records.c.owner.in_(owner))
+        elif owner is not None:
             query = query.where(records.c.owner == owner)
         if state is not None:
             query = query.where(records.c.state == state)
@@ -129,6 +156,22 @@ class Transaction:
                 name: getattr(stmt.excluded, name) for name in ("owner", "state", "due", "value")
             })
         return bool(self.connection.execute(stmt).rowcount)
+
+    def put_many(self, bucket, documents, *, owner_field=None, once=False):
+        rows = [{"bucket": bucket, "key": doc["id"], "owner": doc[owner_field] if owner_field else "",
+                 "state": "", "due": None, "value": doc} for doc in documents]
+        if not rows:
+            return 0
+        insert = sqlite_insert if self.sqlite else pg_insert
+        stmt = insert(records).values(rows)
+        cols = [records.c.bucket, records.c.key]
+        if once:
+            stmt = stmt.on_conflict_do_nothing(index_elements=cols)
+        else:
+            stmt = stmt.on_conflict_do_update(index_elements=cols, set_={
+                "owner": stmt.excluded.owner, "value": stmt.excluded.value,
+            })
+        return len(self.connection.execute(stmt.returning(records.c.key)).all())
 
     def delete(self, bucket, key):
         self.connection.execute(delete(records).where(records.c.bucket == bucket, records.c.key == key))

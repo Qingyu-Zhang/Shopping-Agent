@@ -62,6 +62,7 @@ def cash(cents: int) -> str:
 class Settings:
     database: str = "sqlite:///.data/agent.db"
     platform_database: str = "sqlite:///.data/platform.db"
+    catalog_database: str = ""
     platform_url: str = ""
     platform_transport: str = "http"
     platform_token: str = "local-platform-token"
@@ -73,6 +74,7 @@ class Settings:
     elastic_url: str = ""
     elastic_key: str = ""
     index: str = "shopping-v2"
+    review_recall: bool = True
     redis_url: str = ""
     model_url: str = ""
     model_key: str = ""
@@ -84,6 +86,8 @@ class Settings:
     rerank_model: str = ""
     rerank_key: str = ""
     clip_model: str = ""
+    catalog_images: str = ""
+    vision_chat_model: str = ""
     auth_jwt_secret: str = ""
     auth_issuer: str = "shopping-identity"
     auth_audience: str = "shopping-agent"

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from .core import stable_id
+from pydantic import Field
+
+from .attributes import SCHEMA, Scalar, category_attributes, metadata_attributes, normalize_value
+from .core import Input, stable_id, timestamp
 
 SOURCE = "Amazon Reviews'23"
 
@@ -65,16 +69,9 @@ def snapshot_price(value):
 
 
 def category_for(title, categories):
-    import re
     text = " ".join([title, *categories]).lower()
-    for category, pattern in (
-        ("dock", r"\b(docking station|usb[ -]?c hub|thunderbolt dock|dock for)\b"),
-        ("monitor", r"\b(monitors|display monitor|gaming monitor)\b"),
-        ("laptop", r"\b(laptops|laptop computer|notebook computer|chromebook)\b"),
-        ("filter", r"\b(air purifier filter|replacement air filter)\b"),
-        ("pet_food", r"\b(cat food|kitten food)\b"),
-    ):
-        if re.search(pattern, text):
+    for category, spec in SCHEMA["categories"].items():
+        if (pattern := spec.get("catalog", spec["query"])) and re.search(pattern, text):
             return category
     return "other"
 
@@ -86,8 +83,10 @@ def metadata_document(row):
     key = "reviews23-" + asin
     details = read_details(row.get("details"))
     categories = strings(row.get("categories"))
+    category = category_for(title, categories)
+    features, description = strings(row.get("features")), strings(row.get("description"))
     photos = []
-    for image in image_rows(row.get("images")):
+    for image in sorted(image_rows(row.get("images")), key=lambda image: image.get("variant") != "MAIN"):
         url = next((image[k] for k in ("hi_res", "large", "thumb")
                     if isinstance(image.get(k), str) and image[k].startswith("https://")), None)
         if url and url not in photos:
@@ -98,8 +97,9 @@ def metadata_document(row):
         "id": key, "product_id": key, "sku_id": None, "external_id": asin, "source": SOURCE,
         "source_version": "2023", "title": title.strip()[:500],
         "brand": str(details.get("Brand") or details.get("Manufacturer") or "")[:150],
-        "category": category_for(title, categories), "category_path": categories[:20],
-        "details": details, "description": " ".join(strings(row.get("description")) + strings(row.get("features")))[:10000],
+        "category": category, "category_path": categories[:20], "main_category": row.get("main_category"),
+        "store": row.get("store"), "details": details, "attributes": metadata_attributes(category, details),
+        "features": features, "description": " ".join(description),
         "snapshot_price": snapshot_price(row.get("price")), "snapshot_currency": "USD",
         "rating": rating if isinstance(rating, (int, float)) and 0 <= rating <= 5 else None,
         "rating_count": count if type(count) is int and count >= 0 else None,
@@ -121,7 +121,7 @@ def review_document(row, product_id):
     rating = row.get("rating")
     return {
         "id": key, "product_id": product_id, "sku_id": None, "external_asin": asin,
-        "kind": "review", "text": (title + "\n" + text).strip()[:8000], "source": SOURCE,
+        "kind": "review", "text": (title + "\n" + text).strip(), "source": SOURCE,
         "rating": rating if isinstance(rating, (int, float)) and 1 <= rating <= 5 else None,
         "timestamp": when if type(when) is int else None,
         "helpful_votes": helpful if type(helpful) is int and helpful >= 0 else None,
@@ -140,48 +140,120 @@ def batches(rows, size=200):
         yield batch
 
 
-def import_reviews23(store, metadata_path, reviews_path, *, product_limit=1000, reviews_per_product=20):
+def import_reviews23(store, metadata_path, reviews_path, *, product_limit=1000, reviews_per_product=20,
+                     parent_asins=None):
     counters = Counter()
     retained = set()
-    for batch in batches(records(metadata_path, counters)):
+    requested = set(parent_asins) if parent_asins is not None else None
+    limit = len(requested) if requested is not None else product_limit
+
+    def products():
+        for row in records(metadata_path, counters):
+            if requested is not None and row.get("parent_asin") not in requested:
+                continue
+            doc = metadata_document(row)
+            if doc is None:
+                counters["invalid_metadata"] += 1
+                continue
+            retained.add(doc["id"])
+            yield doc
+            if len(retained) >= limit:
+                break
+
+    for batch in batches(products(), 150):
+        unique = list({doc["id"]: doc for doc in batch}.values())
         with store.transaction(True) as tx:
-            for row in batch:
-                doc = metadata_document(row)
-                if not doc:
-                    counters["invalid_metadata"] += 1
-                    continue
-                key = doc["id"]
-                if key not in retained and len(retained) >= product_limit:
-                    break
-                tx.put("catalog", key, doc)
-                tx.put("products", key, doc)
-                retained.add(key)
-        if len(retained) >= product_limit:
-            break
+            tx.put_many("catalog", unique, owner_field="product_id")
+            tx.put_many("products", unique)
     counters["products"] = len(retained)
-    if not reviews_path:
+    if requested is not None:
+        counters["missing_products"] = len(requested) - len(retained)
+    if not reviews_path or not retained:
         return dict(counters)
     counts = Counter()
-    for batch in batches(records(reviews_path, counters)):
+    review_ids = set()
+    saturated = 0
+
+    def selected_reviews():
+        nonlocal saturated
+        for row in records(reviews_path, counters):
+            parent = row.get("parent_asin")
+            if not identifier(parent):
+                counters["invalid_reviews"] += 1
+                continue
+            product_id = "reviews23-" + parent
+            if product_id not in retained:
+                counters["reviews_outside_subset"] += 1
+                continue
+            if counts[product_id] >= reviews_per_product:
+                continue
+            doc = review_document(row, product_id)
+            if not doc:
+                counters["invalid_reviews"] += 1
+                continue
+            if doc["id"] in review_ids:
+                continue
+            review_ids.add(doc["id"])
+            counts[product_id] += 1
+            yield doc
+            if counts[product_id] == reviews_per_product:
+                saturated += 1
+                if saturated == len(retained):
+                    break
+
+    for batch in batches(selected_reviews(), 150):
         with store.transaction(True) as tx:
-            for row in batch:
-                parent = row.get("parent_asin")
-                if not identifier(parent):
-                    counters["invalid_reviews"] += 1
-                    continue
-                product_id = "reviews23-" + parent
-                if product_id not in retained:
-                    counters["reviews_outside_subset"] += 1
-                    continue
-                if counts[product_id] >= reviews_per_product:
-                    continue
-                doc = review_document(row, product_id)
-                if not doc:
-                    counters["invalid_reviews"] += 1
-                    continue
-                if tx.put("evidence", doc["id"], doc, owner=product_id, once=True):
-                    counters["reviews_added"] += 1
-                counts[product_id] += 1
-        if retained and len(counts) == len(retained) and min(counts.values()) >= reviews_per_product:
-            break
+            added = tx.put_many("evidence", batch, owner_field="product_id", once=True)
+            if added:
+                counters["reviews_added"] += added
     return dict(counters)
+
+
+class DemoOffer(Input):
+    parent_asin: str = Field(pattern=r"^[A-Za-z0-9]{1,40}$")
+    sku_id: str = Field(pattern=r"^demo-[A-Za-z0-9-]{1,90}$")
+    variant: str = Field(min_length=1, max_length=100)
+    attributes: dict[str, Scalar | list[Scalar]]
+    price_cents: int = Field(strict=True, ge=1, le=100_000_000)
+    stock: int = Field(strict=True, ge=0)
+    shipping_cents: int = Field(default=0, strict=True, ge=0)
+    lead_hours: int = Field(default=24, strict=True, ge=0)
+
+
+def seed_demo_offers(store, offers_path):
+    counters = Counter()
+    rows = [DemoOffer.model_validate(row) for row in records(offers_path, counters)]
+    if counters["invalid_rows"] or not rows or len({row.sku_id for row in rows}) != len(rows):
+        raise ValueError("Expected a nonempty demo offer file with unique SKU IDs.")
+    now = timestamp()
+    added = 0
+    with store.transaction(True) as tx:
+        for row in rows:
+            parent = tx.get("products", "reviews23-" + row.parent_asin)
+            if not parent or parent.get("source") != SOURCE:
+                raise ValueError(f"Import parent {row.parent_asin} before seeding its demo offer.")
+            specs = {}
+            definitions = category_attributes(parent["category"])
+            for key, value in row.attributes.items():
+                spec = definitions.get(key)
+                if not spec or (spec["type"] == "set") != isinstance(value, list):
+                    raise ValueError(f"Invalid {key} for {row.sku_id}.")
+                values = value if isinstance(value, list) else [value]
+                typed = [normalize_value(spec, item) for item in values]
+                if not typed or any(item is None for item in typed):
+                    raise ValueError(f"Invalid {key} value for {row.sku_id}.")
+                specs[key] = typed if isinstance(value, list) else typed[0]
+            catalog = {**parent, "id": row.sku_id, "sku_id": row.sku_id, "variant": row.variant,
+                       "specs": specs, "source": "Amazon Reviews'23 + simulated variant",
+                       "variant_source": "Demo fixture"}
+            tx.put("catalog", row.sku_id, catalog, owner=parent["id"], once=True)
+            offer_id = f"{row.sku_id}-offer"
+            offer = {"id": offer_id, "sku_id": row.sku_id, "title": parent["title"], "variant": row.variant,
+                     "seller": "Demo Fashion Store", "unit_price": row.price_cents, "stock": row.stock,
+                     "currency": "USD", "shipping": row.shipping_cents, "lead_hours": row.lead_hours,
+                     "updated_at": now, "source": "Demo fixture"}
+            if tx.put("offers", offer_id, offer, owner=row.sku_id, once=True):
+                key = f"{offer_id}-initial"
+                tx.put("price_history", key, {**offer, "id": key, "at": now}, owner=offer_id, once=True)
+                added += 1
+    return added

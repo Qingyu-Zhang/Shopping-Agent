@@ -247,7 +247,7 @@ def create_app(settings: Settings | None = None, clock=timestamp):
                     break
                 if not updates:
                     yield ": keepalive\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

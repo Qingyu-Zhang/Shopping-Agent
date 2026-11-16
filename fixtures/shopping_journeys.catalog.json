@@ -1,0 +1,25 @@
+{
+  "catalog": [
+    {"id":"bench-pump-black-7","sku_id":"bench-pump-black-7","product_id":"bench-pump","title":"Harbor Point Platform Pumps","category":"shoes","variant":"Black, US 7","specs":{"color":"black","shoe_size_us":7},"snapshot_price":4500,"lead_hours":20},
+    {"id":"bench-pump-white-8","sku_id":"bench-pump-white-8","product_id":"bench-pump","title":"Harbor Point Platform Pumps","category":"shoes","variant":"White, US 8","specs":{"color":"white","shoe_size_us":8},"snapshot_price":4300,"lead_hours":24},
+    {"id":"bench-trail-black-8","sku_id":"bench-trail-black-8","product_id":"bench-trail","title":"Ridgetop Trail Sneakers","category":"shoes","variant":"Black, US 8","specs":{"color":"black","shoe_size_us":8},"snapshot_price":5749,"shipping":199,"lead_hours":16},
+    {"id":"bench-trail-navy-8","sku_id":"bench-trail-navy-8","product_id":"bench-trail","title":"Ridgetop Trail Sneakers","category":"shoes","variant":"Navy, US 8","specs":{"color":"navy","shoe_size_us":8},"snapshot_price":5200,"lead_hours":36},
+    {"id":"bench-trail-black-9","sku_id":"bench-trail-black-9","product_id":"bench-trail","title":"Ridgetop Trail Sneakers","category":"shoes","variant":"Black, US 9","specs":{"color":"black","shoe_size_us":9},"snapshot_price":5950,"lead_hours":20},
+    {"id":"bench-trail-black-85","sku_id":"bench-trail-black-85","product_id":"bench-trail","title":"Ridgetop Trail Sneakers","category":"shoes","variant":"Black, US 8.5","specs":{"color":"black","shoe_size_us":8.5},"snapshot_price":6100,"lead_hours":36},
+    {"id":"bench-slipon","product_id":"bench-slipon","title":"Harbor Studio Slip-on Shoes","category":"shoes","description":"Soft upper with an easy slip-on opening.","specs":{}},
+    {"id":"bench-shirt-blue-s","sku_id":"bench-shirt-blue-s","product_id":"bench-shirt","title":"Lakeside Everyday Shirts","category":"clothing","variant":"Blue cotton, S","specs":{"color":"blue","size":"s","material":["cotton"]},"snapshot_price":2400,"lead_hours":24},
+    {"id":"bench-shirt-white-m","sku_id":"bench-shirt-white-m","product_id":"bench-shirt","title":"Lakeside Everyday Shirts","category":"clothing","variant":"White cotton, M","specs":{"color":"white","size":"m","material":["cotton"]},"snapshot_price":2700,"lead_hours":20},
+    {"id":"bench-shirt-black-m","sku_id":"bench-shirt-black-m","product_id":"bench-shirt","title":"Lakeside Everyday Shirts","category":"clothing","variant":"Black polyester, M","specs":{"color":"black","size":"m","material":["polyester"]},"snapshot_price":1800,"lead_hours":12},
+    {"id":"bench-shirt-blue-m","sku_id":"bench-shirt-blue-m","product_id":"bench-shirt","title":"Lakeside Everyday Shirts","category":"clothing","variant":"Blue linen, M","specs":{"color":"blue","size":"m","material":["linen"]},"snapshot_price":2900,"lead_hours":36},
+    {"id":"bench-bag-black","sku_id":"bench-bag-black","product_id":"bench-bag","title":"Market Square Tote Bag","category":"bags","variant":"Black canvas","specs":{"color":"black","material":["canvas"]},"snapshot_price":4400,"lead_hours":36},
+    {"id":"bench-bag-brown","sku_id":"bench-bag-brown","product_id":"bench-bag","title":"Market Square Tote Bag","category":"bags","variant":"Brown leather","specs":{"color":"brown","material":["leather"]},"snapshot_price":6500,"lead_hours":18},
+    {"id":"bench-bag-beige","sku_id":"bench-bag-beige","product_id":"bench-bag","title":"Market Square Tote Bag","category":"bags","variant":"Beige canvas","specs":{"color":"beige","material":["canvas"]},"snapshot_price":3700,"lead_hours":20}
+  ],
+  "evidence": [
+    {"id":"review-bench-pump-black-7","product_id":"bench-pump","sku_id":"bench-pump-black-7","text":"My black pair runs short. I would size up next time.","rating":3},
+    {"id":"review-bench-pump-white-8","product_id":"bench-pump","sku_id":"bench-pump-white-8","text":"The white pair fit as expected but the heel strap rubbed after an hour.","rating":3},
+    {"id":"review-bench-trail-black-8","product_id":"bench-trail","sku_id":"bench-trail-black-8","text":"The cushioning was comfortable while standing all day on a hard floor.","rating":5},
+    {"id":"review-bench-bag-brown","product_id":"bench-bag","sku_id":"bench-bag-brown","text":"It fit my laptop and water bottle. The outer leather wipes clean.","rating":4},
+    {"id":"review-bench-slipon","product_id":"bench-slipon","text":"The opening felt loose when walking downhill. The lining felt soft.","rating":3}
+  ]
+}

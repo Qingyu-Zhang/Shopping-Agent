@@ -75,11 +75,26 @@ class Runs:
             return row
 
     @staticmethod
-    def add_event(row, state):
-        row["state"] = state
-        if not row["events"] or row["events"][-1]["state"] != state:
-            row["events"] = [*row["events"][-39:], {"id": row["events"][-1]["id"]+1 if row["events"] else 1,
-                                                   "state": state}]
+    def add_event(row, state, **payload):
+        previous = row["events"][-1] if row["events"] else {}
+        event = {"state": state, **payload}
+        if not payload:
+            row["state"] = state
+        if event != {key: value for key, value in previous.items() if key != "id"}:
+            row["events"] = [*row["events"][-39:], {"id": previous.get("id", 0)+1, **event}]
+
+    def _run_graph(self, row, lease, value, config):
+        for update in self.graph.stream(value, config, stream_mode="custom", durability="sync"):
+            event = update.get("event")
+            if event not in {"stage", "recommendation"}:
+                continue
+            account, run_id = row["account_id"], row["id"]
+            with self.store.transaction(True) as tx:
+                current = tx.require("runs", run_id, account, lock=True)
+                if current.get("lease") != lease:
+                    continue
+                self.add_event(current, event, **{key: item for key, item in update.items() if key != "event"})
+                tx.put("runs", run_id, current, owner=account, state="pending", due=self.clock()+420)
 
     def step(self, row, lease):
         run_id, account = row["id"], row["account_id"]
@@ -89,11 +104,11 @@ class Runs:
             if snap.interrupts:
                 pending = snap.interrupts[0]
                 if row.get("resume", {}).get("id") == pending.id:
-                    self.graph.invoke(Command(resume={pending.id: row["resume"]["answer"]}), config, durability="sync")
+                    self._run_graph(row, lease, Command(resume={pending.id: row["resume"]["answer"]}), config)
             elif snap.next:
-                self.graph.invoke(None, config, durability="sync")
+                self._run_graph(row, lease, None, config)
             elif not snap.values:
-                self.graph.invoke(row["input"], config, durability="sync")
+                self._run_graph(row, lease, row["input"], config)
             snap = self.graph.get_state(config)
             if snap.interrupts:
                 pending = snap.interrupts[0]
@@ -158,12 +173,18 @@ class Runtime:
         if settings.demo:
             seed_catalog(self.store)
         self.platform = RemotePlatform(settings) if settings.platform_url else boot_platform(settings, clock)
+        catalog_url = settings.catalog_database or (settings.platform_database if not settings.platform_url else "")
+        local_platform = None if settings.platform_url else self.platform.store
+        local_memory = (local_platform and local_platform.sqlite
+                        and local_platform.engine.url.database in {None, "", ":memory:"})
+        self.catalog_source = (local_platform if local_memory and not settings.catalog_database
+                               else Store(catalog_url, read_only=True) if catalog_url else None)
         self.redis = None
         if settings.redis_url:
             from redis import Redis
             self.redis = Redis.from_url(settings.redis_url, socket_timeout=1, socket_connect_timeout=1)
         self.models = Models(settings, cache=self.redis)
-        self.catalog = Catalog(self.store, self.models, settings)
+        self.catalog = Catalog(self.store, self.models, settings, source=self.catalog_source)
         self.planner = Planner(self.catalog, self.platform)
         self.checkout = Checkout(self.store, self.platform, self.planner, settings, clock)
         self.automations = Automations(self.store, self.platform, self.planner, settings, clock)
@@ -200,6 +221,8 @@ class Runtime:
         from sqlalchemy import text
         with self.store.engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+        if self.catalog_source:
+            self.catalog_source.list("catalog", limit=1)
         if self.settings.elastic_url:
             for bucket in ("catalog", "evidence"):
                 self.catalog.http.head(f"/{self.settings.index}-{bucket}").raise_for_status()
@@ -213,6 +236,8 @@ class Runtime:
             self.redis.close()
         self.models.http.close()
         self.catalog.http.close()
+        if self.catalog_source and self.catalog_source.read_only:
+            self.catalog_source.engine.dispose()
         if isinstance(self.platform, RemotePlatform):
             self.platform.http.close()
         else:

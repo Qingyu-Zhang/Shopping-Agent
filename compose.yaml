@@ -1,6 +1,12 @@
 name: shopping-agent-v2
+x-vision-build: &vision-build
+  context: .
+  args:
+    INSTALL_VISION: "${INSTALL_VISION:-0}"
 x-agent-env: &agent-env
   DATABASE: postgresql://shopping:shopping@postgres:5432/agent
+  PLATFORM_DATABASE: postgresql://shopping:shopping@postgres:5432/platform
+  CATALOG_DATABASE: postgresql://shopping:shopping@postgres:5432/platform
   ELASTIC_URL: http://elastic:9200
   REDIS_URL: redis://redis:6379/0
   PLATFORM_URL: http://platform:8001/mcp
@@ -19,6 +25,10 @@ x-agent-env: &agent-env
   RERANK_URL: "${RERANK_URL:-}"
   RERANK_KEY: "${RERANK_KEY:-}"
   RERANK_MODEL: "${RERANK_MODEL:-}"
+  REVIEW_RECALL: "${REVIEW_RECALL:-1}"
+  CLIP_MODEL: "${CLIP_MODEL:-}"
+  CATALOG_IMAGES: "${CATALOG_IMAGES:-}"
+  VISION_CHAT_MODEL: "${VISION_CHAT_MODEL:-}"
 services:
   postgres:
     image: postgres:17
@@ -71,25 +81,32 @@ services:
       timeout: 3s
       retries: 20
   indexer:
-    build: .
+    build: *vision-build
     command: ["reindex"]
     environment: *agent-env
+    volumes:
+      - ./.data/catalog-images:/catalog-images
     depends_on:
       postgres: {condition: service_healthy}
+      platform: {condition: service_healthy}
       elastic: {condition: service_healthy}
   api:
-    build: .
+    build: *vision-build
     command: ["api", "--host", "0.0.0.0"]
     environment: *agent-env
+    volumes:
+      - ./.data/catalog-images:/catalog-images:ro
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       indexer: {condition: service_completed_successfully}
       platform: {condition: service_healthy}
       redis: {condition: service_healthy}
   worker:
-    build: .
+    build: *vision-build
     command: ["worker"]
     environment: *agent-env
+    volumes:
+      - ./.data/catalog-images:/catalog-images:ro
     depends_on:
       indexer: {condition: service_completed_successfully}
       platform: {condition: service_healthy}

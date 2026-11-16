@@ -29,13 +29,13 @@
 
 > Find a lightweight laptop and a dock that can drive a 4K 60 Hz monitor, under $1,000 total.
 
-可能出现两台不同的笔记本和几个扩展坞。有些方案有更轻的电脑，有些更便宜。打开其中一套，你可以看到对应规格、卖家、总价和预计到货时间。此时后端已经请平台核过价。若用户要购买，还会再走一次报价确认。
+可能出现两台不同的笔记本和几个扩展坞。有些方案有更轻的电脑，有些更便宜。方案卡会显示对应规格、卖家、总价和预计到货时间，还可以展开推荐理由的证据。此时后端已经请平台核过价。若用户要购买，还会再走一次报价确认。
 
 接着输入第二句话，使用页面上实际显示的方案编号。
 
 > Option 2, keep the laptop and replace the dock with a lighter dock.
 
-这一轮需要三种信息。用户刚说了改哪个部件，上一轮记录了第二套的商品和卖家，任务还记得整套 $1,000 的预算与 60 Hz 要求。后端合并这些信息后，重新找扩展坞并核价。项目有测试验证这条路径。 [英文组合测试](tests/test_workflows.py#L74)
+这一轮需要三种信息。用户刚说了改哪个部件，上一轮记录了第二套的商品和卖家，任务还记得整套 $1,000 的预算与 60 Hz 要求。后端合并这些信息后，重新找扩展坞并核价。项目有测试验证这条路径。 [英文组合测试](tests/test_workflows.py#L75)
 
 ```mermaid
 flowchart LR
@@ -79,7 +79,7 @@ FastAPI 把请求交给相应的 Python 函数。Pydantic 检查请求正文的�
 
 ### 为什么发完消息先收到一个 ID
 
-一条请求可能需要查目录、调用模型、等待平台报价。API 把待处理工作存入数据库后，先返回 `202 Accepted` 和 `run_id`。**Worker** 是负责执行后台工作的程序。它定期检查数据库里的待处理记录，领取这轮请求，运行 LangGraph，再把状态和结果写回去。浏览器用 `run_id` 查结果。API 也支持 SSE，可以在同一个 HTTP 响应流里订阅状态变化。当前 demo 用的是轮询，即按间隔发 GET 请求。 [轮次 API](shopping_agent/api.py#L199) · [Worker 实现](shopping_agent/runtime.py#L221)
+一条请求可能需要查目录、调用模型、等待平台报价。API 把待处理工作存入数据库后，先返回 `202 Accepted` 和 `run_id`。**Worker** 领取这轮请求，运行 LangGraph，再把状态和结果写回去。浏览器通过 SSE 接收检索进度，随后逐条显示通过引用校验的推荐理由。断线时可按事件编号续接，也可以按 `run_id` 轮询最终结果。 [轮次 API](shopping_agent/api.py#L207) · [Worker 实现](shopping_agent/runtime.py)
 
 | 标识 | 保存了什么 | 什么情况下有用 |
 |---|---|---|
@@ -106,7 +106,9 @@ FastAPI 把请求交给相应的 Python 函数。Pydantic 检查请求正文的�
 }
 ```
 
-代码先用 `detect()` 处理常见英文表达。如果配置了 LLM，再让模型按 `Patch` 对应的 JSON schema 组织回复。**Prompt Engineering** 在这里具体表现为给模型明确任务、结构和示例规则。系统提示要求模型提取显式的变化、使用美元分、理解预算约束整套方案，并识别 “a dock that can drive a monitor” 里的显示器只是连接目标。`models.py` 调用兼容的 `/chat/completions` 接口，`graph.py` 用 Pydantic 校验返回字段。模型返回无效结构时，内置规则仍然能覆盖演示问法。 [意图模型与提示词](shopping_agent/graph.py#L196) · [模型 HTTP 客户端](shopping_agent/models.py#L27)
+代码先用 `detect()` 处理常见英文表达。如果配置了 LLM，再让模型按 `Patch` 对应的 JSON schema 组织回复。**Prompt Engineering** 在这里具体表现为给模型明确任务、结构和示例规则。系统提示要求模型提取显式的变化、使用美元分、理解预算约束整套方案，并识别 “a dock that can drive a monitor” 里的显示器只是连接目标。`models.py` 调用兼容的 `/chat/completions` 接口，`graph.py` 用 Pydantic 校验返回字段。模型返回无效结构时，内置规则仍然能覆盖演示问法。 [意图模型与提示词](shopping_agent/graph.py#L240) · [模型 HTTP 客户端](shopping_agent/models.py#L44)
+
+颜色、尺码和材质等商品属性可以写成 `conditions`。每项都带品类、属性名、比较方式、目标值和是否必选。例如“蓝色棉衬衫搭配黑色帆布包”会把两组颜色和材质分别归到对应品类。不同品类共用等值、范围和集合筛选，具体可用属性由目录定义。 [属性定义](shopping_agent/attributes.json) · [条件解析](shopping_agent/attributes.py#L115)
 
 ### LangGraph 把处理步骤写在程序里
 
@@ -119,11 +121,11 @@ flowchart TD
     C -->|"用户回复"| U
     U -->|"搜索或比较"| R["research · 可选只读工具研究"]
     R --> Q["resolve · 形成业务结果"]
-    U -->|"订单查询或操作建议"| Q
+    U -->|"评论问答、订单查询或操作建议"| Q
     Q --> E["保存运行结果"]
 ```
 
-试着把第一次请求改成 “Find a dock that can drive a 4K 60 Hz monitor.”。这次你只买扩展坞，系统缺少要连接哪类主机的信息。`clarify()` 可以问主机的视频协议并暂停。系统用 **checkpoint** 保存执行状态，收到 “My laptop supports DisplayPort 1.4 Alt Mode.” 后，按同一个 `run_id` 恢复。回复里的笔记本提供已有设备的信息，购买品类仍是扩展坞。测试会关闭第一次创建的应用，再启动另一个应用，验证它能从保存的位置继续。 [LangGraph 节点和路径](shopping_agent/graph.py#L181) · [澄清恢复测试](tests/test_workflows.py#L101)
+试着把第一次请求改成 “Find a dock that can drive a 4K 60 Hz monitor.”。这次你只买扩展坞，系统缺少要连接哪类主机的信息。`clarify()` 可以问主机的视频协议并暂停。系统用 **checkpoint** 保存执行状态，收到 “My laptop supports DisplayPort 1.4 Alt Mode.” 后，按同一个 `run_id` 恢复。回复里的笔记本提供已有设备的信息，购买品类仍是扩展坞。测试会关闭第一次创建的应用，再启动另一个应用，验证它能从保存的位置继续。 [LangGraph 节点和路径](shopping_agent/graph.py#L226) · [澄清恢复测试](tests/test_workflows.py#L102)
 
 LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义步骤、分支和可恢复的状态流程。在这个项目的代码里，`graph.py` 用 LangGraph 编排步骤，`models.py` 用 HTTP 调模型，`runtime.py` 把执行和持久化接到 Worker 上。
 
@@ -141,7 +143,7 @@ LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义
 }
 ```
 
-这段 JSON 是模型提出的请求。Python 会核对工具名、参数、品类范围，再执行真正的检索，把结果交还给模型。评论工具只能查本轮工具研究中已经见过的商品组。当前实现最多进行两轮工具研究，每轮最多处理三个调用。若模型返回 `commerce_submit`，程序会把它作为不可用工具处理。每次工具调用是否成功可在 `trace.tools` 里观察。 [研究节点与工具白名单](shopping_agent/graph.py#L279)
+这段 JSON 是模型提出的请求。Python 会核对工具名、参数、品类范围，再执行检索，把结果交还给模型。评论工具只能查本轮工具研究中已见过的商品组。多品类搜索最多进行两轮工具研究，每轮最多处理三个调用。单品类搜索在候选不足时可以补查一轮。若模型返回 `commerce_submit`，程序会把它作为不可用工具处理。每次工具调用是否成功可在 `trace.tools` 里观察。 [研究节点与工具白名单](shopping_agent/graph.py#L355)
 
 ## 5. 商品是怎样搜出来的
 
@@ -152,13 +154,13 @@ LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义
 | BM25 关键词召回 | 根据查询词与文档的匹配程度排序，并考虑哪些词更有区分度 | `USB-C`、`HDMI`、`4K@60Hz` 或具体型号命中时容易找到相应条目 |
 | 文本向量召回 | embedding 把文字转换为数字数组，用向量相似度检索表达相近的文档 | 搜 `lightweight laptop for commuting` 时，描述写的是 `portable business laptop` 也有机会成为候选 |
 
-**向量和向量索引是两件不同的事。** embedding 决定文档怎样表示成数字，HNSW 索引帮助 Elasticsearch 快速找接近查询向量的候选。当前 Compose 把向量存入 Elasticsearch 的 `dense_vector` 字段，由 Elasticsearch 同时执行关键词和向量检索。默认的向量由项目的 128 维演示算法生成，按英文 token 做哈希，便于稳定复现。配置外部 `EMBEDDING_MODEL` 并用相同模型重建索引后，才会使用该模型的语义向量。无 Elasticsearch 的本机模式由 Python 在小目录上执行关键词与向量检索。 [检索实现和索引配置](shopping_agent/catalog.py) · [向量生成方式](shopping_agent/models.py#L51)
+**向量和向量索引是两件不同的事。** embedding 决定文档怎样表示成数字，HNSW 索引帮助 Elasticsearch 快速找接近查询向量的候选。当前 Compose 把向量存入 Elasticsearch 的 `dense_vector` 字段，由 Elasticsearch 同时执行关键词和向量检索。默认的向量由项目的 128 维演示算法生成，按英文 token 做哈希，便于稳定复现。配置外部 `EMBEDDING_MODEL` 并用相同模型重建索引后，才会使用该模型的语义向量。无 Elasticsearch 的本机模式由 Python 在小目录上执行关键词与向量检索。 [检索实现和索引配置](shopping_agent/catalog.py) · [向量生成方式](shopping_agent/models.py#L128)
 
-### 两路结果怎样合并
+### 各路结果怎样合并
 
-两路评分的含义不同。项目用 **RRF** 合并它们的名次。假设关键词路把 Link Mini 排第 1，向量路把它排第 3，它得到 `1/(60+1) + 1/(60+3)`。如果 Link Nano 只出现在向量路第 1 名，它在这个示例中的得分是 `1/(60+1)`。两路都找到的商品因此能获得更高的融合分。代码按文档 ID 去重，也记录各路的结果以便排查。
+两路评分的含义不同。项目用 **RRF** 合并它们的名次。假设关键词路把 Link Mini 排第 1，向量路把它排第 3，它得到 `1/(60+1) + 1/(60+3)`。如果 Link Nano 只出现在向量路第 1 名，它在这个示例中的得分是 `1/(60+1)`。两路都找到的商品因此能获得更高的融合分。商品目录按记录 ID 合并片段，评论召回按商品组计分。各路排名也会记录到检索轨迹中。
 
-**召回**把大目录缩成一个候选集合。购买方案先检查确定的单品硬条件，把通过检查的候选送去**精排**。配置 `RERANK_URL` 时，外部精排结果会经过校验，默认配置沿用符合条件的融合排名。图片搜索是可选的第三路。提供本地商品图片并配置 CLIP 后，可以根据输入图片或外观描述搜索图片向量，当前只用于单品类搜索。 [关键词、向量、RRF 和精排入口](shopping_agent/catalog.py#L128)
+**召回**把大目录缩成一个候选集合。涉及舒适度或上脚感受时，评论片段也可以把相关商品带进候选池。购买方案用属性配置在同一 SKU 上检查必选条件，再把通过的候选送去**精排**。例如同款鞋有黑色 7 码和白色 8 码时，还需要找到一个同时满足黑色和 8 码的 SKU。Compose 中配置 CLIP 并为本地商品图片建索引后，单品类搜索还可以根据参考图或外观描述召回相关图片。配置视觉模型后，也可以对少量有图片的候选做带图精排。 [检索和精排入口](shopping_agent/catalog.py#L233) · [属性定义](shopping_agent/attributes.json)
 
 ## 6. 怎样选出可买的组合
 
@@ -173,9 +175,9 @@ LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义
 
 代码先为每个品类建候选列表，然后批量查这些 SKU 的 Offer。`compatibility()` 检查主机能提供的协议、扩展坞需要的输入，以及它在目标端口能输出的刷新率。显式要求 DisplayPort 输出时，只有 HDMI 的 Link Mini 会被排除。像 `air-8` 这样的规格缺失案例也有明确结论，即当前证据不足以确认它满足要求。
 
-得到通过规格检查的组合后，Planner 用粗估价格选择要核价的组合。平台报价返回后，先验证整套预算和送达截止时间，再按用户偏好排序。比如“最便宜”按实际应付，“最快送达”按实际预计到货时间。最终按 SKU 组合去重，最多返回三套。 [单品规格过滤](shopping_agent/planner.py#L30) · [候选组合与报价](shopping_agent/planner.py#L186)
+得到通过规格检查的组合后，Planner 用粗估价格选择要核价的组合。平台报价返回后，先验证整套预算和送达截止时间，再按用户偏好排序。比如“最便宜”按实际应付，“最快送达”按实际预计到货时间。最终按 SKU 组合去重，最多返回三套。 [单品规格过滤](shopping_agent/planner.py#L31) · [候选组合与报价](shopping_agent/planner.py#L199)
 
-第二轮说“保留笔记本，换轻一点的扩展坞”时，程序固定已选的笔记本 SKU 和卖家 Offer，排除原扩展坞。原扩展坞有已知重量时，新的一轮会要求替代件比它更轻。以示例里的 Link Mini 为例，重量为 82 g，Link Nano 的 58 g 可满足变轻要求。Link Lite 虽然只有 50 g，仍会因 30 Hz 规格被淘汰。这是“保留一个约束的同时改变另一个条件”的具体实现。 [修改方案的处理](shopping_agent/graph.py#L328) · [重量与规格数据](shopping_agent/seed.py)
+第二轮说“保留笔记本，换轻一点的扩展坞”时，程序固定已选的笔记本 SKU 和卖家 Offer，排除原扩展坞。原扩展坞有已知重量时，新的一轮会要求替代件比它更轻。以示例里的 Link Mini 为例，重量为 82 g，Link Nano 的 58 g 可满足变轻要求。Link Lite 虽然只有 50 g，仍会因 30 Hz 规格被淘汰。这是“保留一个约束的同时改变另一个条件”的具体实现。 [修改方案的处理](shopping_agent/graph.py#L416) · [重量与规格数据](shopping_agent/seed.py)
 
 ## 7. RAG 怎样使用评论
 
@@ -183,22 +185,22 @@ LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义
 
 | 检索目的 | 查什么 | 结果怎么用 |
 |---|---|---|
-| 先找商品 | 商品名、描述、规格与其他目录字段 | 得到参与组合与报价的候选 |
-| 再找证据 | 已选商品组内的相关评论 | 给用户展示体验类原文与来源 |
+| 先找商品 | 商品名、描述、规格等目录字段，以及与体验要求相关的评论片段 | 得到参与组合与报价的候选 |
+| 再找证据 | 候选商品组内的相关评论，能对上变体时优先找对应变体 | 给用户展示体验类原文与来源 |
 
 例如，用户想知道扩展坞是否便于携带。项目里的 Link Mini 评论写道：
 
 > Fits into my laptop bag. The included cable is short.
 
-模型可以挑选其中一句作为体验摘录。程序会核对证据 ID 是否属于传给模型的候选，并检查摘录确实是原文的一段。这项检查保证引用文本可找到。用户说“我要 4K 60 Hz”时，程序用结构化规格判断；用户想知道今天的总价时，用平台报价。三个数据源各自回答能支持的问题。 [评论摘录校验](shopping_agent/graph.py#L385) · [演示评论](shopping_agent/seed.py#L58)
+模型可以挑选其中一句作为体验摘录。短评论整条入索引，长评论按句子或段落附近的边界切分。每个片段保留原文记录 ID，方便检索后核对出处。用户说“我要 4K 60 Hz”时，程序用结构化规格判断。用户想知道今天的总价时，程序用平台报价。 [评论分块](shopping_agent/passages.py#L31) · [演示评论](shopping_agent/seed.py#L58)
 
-配置外部模型时，这一步会把问题和一小批评论交给模型挑选摘录。默认演示直接显示检索到的短原文。购买方案的总价和到货摘要，由代码从平台返回的结构化字段生成。
+配置外部模型时，程序会把问题、最多三个候选及各自的证据交给模型。模型逐条生成理由、取舍和引用。程序核对每条引用是否属于对应候选、摘录是否出现在原文中，再通过 SSE 发给页面。未配置模型时，演示用已有资料生成简短理由。单独追问某款鞋是否偏小，程序会先定位商品，再查评论，并保留上一轮的购买方案。 [推荐生成与引用校验](shopping_agent/recommendations.py#L94) · [评论问答](shopping_agent/graph.py#L529)
 
 ### Reviews’23 数据怎样进入项目
 
-可以把 Reviews’23 理解成一批已有的商品资料和评论。导入代码读商品元数据、评论文件，用 `parent_asin` 关联商品组。评论自己的 `asin` 保留为来源字段。导入的商品可以查名称、看评论和看到抓取时的价格快照。要形成可购买方案，还需要把这个商品的具体规格和平台 Offer 对应起来，项目导入路径不会自动创建这些交易数据。
+可以把 Reviews’23 理解成一批已有的商品资料和评论。导入代码读取 `dataset/` 中的元数据和评论文件，按 `parent_asin` 关联商品组。评论自己的 `asin` 保留到 `external_asin`，便于追踪变体。在 Compose 中，导入先写平台 PostgreSQL，再由 `reindex` 建立 Elasticsearch 索引。后续购物请求用索引找候选，再从平台目录读取原始记录。
 
-这个例子最适合用来理解“数据库里有资料”和“平台当前能按某个价格成交”各自需要什么。商品检索和评论证据可以用公开数据练习，结算故障场景可以用项目自己的可控演示数据复现。 [导入实现](shopping_agent/dataset.py) · [项目的数据导入命令](README.md#import-amazon-reviews23)
+README 的固定样本会导入 23 件 Amazon Fashion 商品，可以选择同时加载四个模拟 SKU 的价格与库存。商品卡可能显示抓取时的价格快照，具体购买方案需要平台给对应 SKU 返回当前报价。有了样本和模拟报价，就可以试 “Find black shoes in US size 8 under $60.”，再追问 Bandolino 鞋款是否偏小。 [导入实现](shopping_agent/dataset.py) · [项目的数据导入命令](README.md#import-amazon-reviews23)
 
 ## 8. MCP 怎样连接电商平台
 
@@ -207,7 +209,7 @@ LangChain 常用来统一封装模型、消息和工具。LangGraph 负责定义
 | 调用关系 | 具体例子 | 调用方为什么要发这个请求 |
 |---|---|---|
 | 浏览器 → Agent API | `POST /v1/tasks/{task_id}/turns` | 把用户输入交给 Agent |
-| Agent → 模型 API | `POST /chat/completions` | 请模型提取意图或提出只读工具调用 |
+| Agent → 模型 API | `POST /chat/completions` | 请模型提取意图、提出只读工具调用或生成推荐理由 |
 | Agent → 电商平台 | `commerce_quote` | 请拥有库存和报价的业务系统核价 |
 
 **MCP** 为第三种调用提供一种约定好的工具接口。在 Compose 模式，Agent 是 MCP 客户端，平台 sandbox 是 MCP 服务端。sandbox 是用来复现正常交易、涨价或付款失败的模拟业务系统。下面这个函数调用展示了 Agent 内部传给平台的参数。
@@ -225,13 +227,13 @@ quote = platform.call(
 
 本机默认运行时，`platform` 是同进程的 `MockPlatform`，Python 直接运行核价方法。配置远程平台后，`RemotePlatform` 用 HTTP 工具路由或 MCP 的 `call_tool()` 发送相同的业务参数。Compose 配置选择后者，客户端连接平台的 `/mcp`。平台接到请求后校验参数、访问平台数据库，再把报价结果返回。业务函数始终能调用同一个 `platform.call()`，因此可以在本机轻量模式和远程服务模式间切换。 [平台工具与适配器](shopping_agent/platform.py) · [Compose 中的平台连接](compose.yaml)
 
-当你读到 **Function Calling**，问“这条工具请求是不是由模型提出的”。当你读到 **MCP**，问“Agent 用什么协议调用远程工具”。在这个项目里，模型可以提出 `search_products`。用户确认后，代码还能由结算 Worker 经 MCP 调用 `commerce_submit`。
+当你读到 **Function Calling**，问“这条工具请求是不是由模型提出的”。当你读到 **MCP**，问“Agent 用什么协议调用远程工具”。在这个项目里，`search_products` 和 `get_product_evidence` 由 Agent 直接查目录。平台另外注册了 12 个交易工具，例如 `commerce_offers` 查报价条目和库存，`commerce_quote` 核价并计算预计到货时间。手动结账确认后，结算 Worker 经 MCP 调用 `commerce_submit`。 [平台工具列表](shopping_agent/platform.py#L168) · [研究节点](shopping_agent/graph.py#L355)
 
 ## 9. 下单和退货为什么分步骤
 
 ### 从“想买第二套”到一笔订单
 
-用户说 “Buy option 2.” 时，LangGraph 可以返回操作建议。客户端需要让用户看到正式条款，再调用确认接口。
+用户说 “Buy option 2.” 时，LangGraph 可以返回操作建议。演示页的 `Add to cart` 按钮用于直接加购。要提交订单，可以在方案卡上点击 `Review checkout`，查看正式条款后再确认。
 
 1. **发起报价。** `POST /v1/quotes` 传历史方案、某个购物车版本，或一组明确 Offer。Agent 找出所选行，向平台获取当前报价。
 2. **保存待确认条款。** Agent 给这份报价保存一条收据。返回值里的 `terms` 是从报价内容计算出来的指纹。客户端展示金额、商品、地址、到货时间与期限。
@@ -239,7 +241,7 @@ quote = platform.call(
 4. **后台执行。** Worker 领取结算作业，先用 `attempt_id` 调 `commerce_status`。平台没有这笔尝试的结果时，再以同一个 ID 提交。
 5. **查询结果。** 客户端查询 `GET /v1/checkouts/{attempt_id}`。常见状态是 `processing`、`succeeded`、`failed` 和 `requote`。出现 `requote` 时，会拿到新的收据供用户审核确认。
 
-如果 $49 的扩展坞涨到了 $55，原来展示的金额就发生了变化。平台重新给价，Agent 保留新条款，用户再次确认。这个场景解释了为什么项目在推荐时查一次价，到实际结算又要检查一次。 [结算实现](shopping_agent/checkout.py) · [报价变化测试](tests/test_workflows.py#L150)
+如果 $49 的扩展坞涨到了 $55，原来展示的金额就发生了变化。平台重新给价，Agent 保存新条款，用户再次确认。这个场景解释了为什么项目在推荐时查一次价，到实际结算又要检查一次。 [结算实现](shopping_agent/checkout.py) · [报价变化测试](tests/test_workflows.py#L152)
 
 ### 最值得读懂的故障例子
 
@@ -249,11 +251,11 @@ quote = platform.call(
 2. Worker 等一小段时间后，用同一个 ID 查询。
 3. 平台找到了已经保存的订单结果。Agent 把原有尝试更新为 `succeeded`。
 
-**幂等**在这里的具体含义是，同一个操作 ID 重试，可以读回已有业务结果。**事务**则用来把一组相关数据库写入一起提交。平台在模拟购买成功时一起记录库存变化、订单、支付流水和操作结果。两者一起使这个失败场景可恢复。测试会模拟多次并发确认、丢失响应和重启，并检查只看到一笔支付和订单。 [平台提交实现](shopping_agent/platform.py#L228) · [断线恢复测试](tests/test_workflows.py#L168)
+**幂等**在这里的具体含义是，同一个操作 ID 重试，可以读回已有业务结果。**事务**则用来把一组相关数据库写入一起提交。平台在模拟购买成功时一起记录库存变化、订单、支付流水和操作结果。两者一起使这个失败场景可恢复。测试会模拟多次并发确认、丢失响应和重启，并检查只看到一笔支付和订单。 [平台提交实现](shopping_agent/platform.py#L290) · [断线恢复测试](tests/test_workflows.py#L170)
 
 ### 订单分包与退货
 
-项目按卖家分包。一笔订单里，笔记本可能已送达，扩展坞仍在运输中。退货预览按具体购买行检查该行所在包裹是否送达、剩余可退数量和演示退货窗口，再给出预计退款。用户确认预览后，系统生成退货申请。这样用户可以先退已送达的行，同时保留另一件商品的物流状态。 [分包与退货实现](shopping_agent/platform.py#L281) · [分包退货测试](tests/test_workflows.py#L192)
+项目按卖家分包。一笔订单里，笔记本可能已送达，扩展坞仍在运输中。退货预览按具体购买行检查该行所在包裹是否送达、剩余可退数量和演示退货窗口，再给出预计退款。用户确认预览后，系统生成退货申请。这样用户可以先退已送达的行，同时保留另一件商品的物流状态。 [分包与退货实现](shopping_agent/platform.py#L343) · [分包退货测试](tests/test_workflows.py#L194)
 
 ## 10. 数据库和 Redis 分别存什么
 
@@ -269,20 +271,20 @@ quote = platform.call(
 | 轮次运行记录 | “这一轮现在是 `needs_input`，等待回复某个问题” | 浏览器查进度，后台 Worker 领取作业时 |
 | LangGraph checkpoint | “图执行到澄清节点，已有这些节点状态” | 用户回复后，图从已保存位置继续时 |
 
-项目用一张 `shopping_records` 表收纳不同类型的业务记录，`bucket` 标明是任务、报价还是通知等。每条记录有自己的 `key`、可选的执行期限和 JSON 内容。例如，购物任务在 `tasks`，历史方案在 `task_views`，待处理轮次在 `runs`。checkpoint 则由 LangGraph 的存储组件管理。在 Compose 中，Agent 和平台还有独立的两个数据库，分别保存 Agent 工作状态与平台交易事实。 [数据表与事务](shopping_agent/storage.py) · [运行记录和 checkpoint 接入](shopping_agent/runtime.py)
+项目用一张 `shopping_records` 表收纳不同类型的业务记录，`bucket` 标明是任务、报价还是通知等。每条记录有自己的 `key`、可选的执行期限和 JSON 内容。例如，购物任务在 `tasks`，历史方案在 `task_views`，待处理轮次在 `runs`。checkpoint 则由 LangGraph 的存储组件管理。在 Compose 中，Agent 数据库保存任务和运行状态，平台数据库保存导入的商品与评论，以及 Offer、购物车和订单等交易记录。 [数据表与事务](shopping_agent/storage.py) · [运行记录和 checkpoint 接入](shopping_agent/runtime.py)
 
-Worker 领取作业时会给这项工作标记一个临时有效的**租约**。你可以把它读成“这个 Worker 在期限内负责这条记录”。写回结果时再核对租约。若它崩溃，期限过后，其他 Worker 可以重新领取。处理下单时还会复用业务操作 ID，所以作业重试与订单去重可以一起工作。 [领取和验证租约的代码](shopping_agent/runtime.py#L233)
+Worker 领取作业时会给这项工作标记一个临时有效的**租约**。你可以把它读成“这个 Worker 在期限内负责这条记录”。写回结果时再核对租约。若它崩溃，期限过后，其他 Worker 可以重新领取。处理下单时还会复用业务操作 ID，所以作业重试与订单去重可以一起工作。 [领取作业](shopping_agent/runtime.py#L260) · [写回结果](shopping_agent/runtime.py#L124)
 
 ### Redis 的两项工作
 
 1. **限流。** 配置 Redis 后，API 对每个账户在 60 秒的计数窗口里限制轮次提交次数。比如超过当前设定的 35 次时，收到 `429`。共享的计数让多个 API 实例可以看到同一账户的请求次数。
 2. **短期缓存。** 使用外部 embedding 服务时，最近生成的部分向量可以在 Redis 留 10 分钟。同一模型、端点和文本再次出现时，可以少做一次远程请求。
 
-订单结果和购物任务从持久化数据库读取。Redis 主要帮接口共享短期计数和减少重复计算。Elasticsearch 则帮助按关键词和相似度查商品。 [轮次限流](shopping_agent/api.py#L199) · [Embedding 缓存](shopping_agent/models.py#L51)
+订单结果和购物任务从持久化数据库读取。Redis 主要帮接口共享短期计数和减少重复计算。Elasticsearch 则帮助按关键词和相似度查商品。 [轮次限流](shopping_agent/api.py#L206) · [Embedding 缓存](shopping_agent/models.py#L128)
 
 ### 为什么仓库里有 Docker Compose
 
-学流程时，可以用 Python 直接运行。想观察 API、Worker、平台和数据服务作为独立进程交互时，可以用 Compose。`compose.yaml` 写明了要启动哪些服务、如何连接、什么时候可以开始接受请求。启动时 `indexer` 会从目录库生成 Elasticsearch 索引。然后 API 接收请求，另一个进程里的 Worker 消费数据库任务。对客户端来说，仍然是同样的 URL 和数据结构。 [运行模式与启动步骤](README.md#run-the-service-stack)
+学流程时，可以用 Python 直接运行。想观察 API、Worker、平台和数据服务作为独立进程交互时，可以用 Compose。启动时 `indexer` 从目录库生成 Elasticsearch 索引，成功后退出。然后 API 接收请求，独立的 Worker 从数据库领取任务。改过代码后用 `docker compose up --build -d` 重建应用镜像。用 `docker compose stop` 停止服务时，数据库和索引的数据卷会保留。 [运行模式与启动步骤](README.md#run-the-service-stack)
 
 ## 11. 价格提醒怎样自动执行
 
@@ -293,7 +295,7 @@ Worker 领取作业时会给这项工作标记一个临时有效的**租约**。
 3. Agent 收到事件后，用事件 ID 检查是否已处理，并唤醒对应规则。定期检查也可以在没有收到事件时继续尝试核价。
 4. Worker 用当前平台报价判断是否达到 $40。满足条件时写入站内通知和这一次的执行记录。
 
-同一规则还可以选择 `cart` 或 `buy`。前者只在条件满足时加购物车。后者需要额外配置启用，并要求用户预先授权单次上限、累计预算和已保存的付款方式。基于保存搜索的规则如果要执行加购或购买，还要提供允许的 SKU 和卖家。`buy` 触发后仍走前面的结算流程。规则可以撤销，后台会在接受执行前复查状态与版本。 [提醒和自动采购实现](shopping_agent/automation.py) · [降价触发与撤销测试](tests/test_workflows.py#L216)
+自动化 API 还支持 `cart` 或 `buy`。前者只在条件满足时加购物车。后者需要额外启用，并由用户预先授权单次上限、累计预算和已保存的付款方式。基于保存搜索的规则如果要执行加购或购买，还要提供允许的 SKU 和卖家。`buy` 触发后由结算 Worker 执行。规则可以撤销，后台会在接受执行前复查状态与版本。 [提醒和自动采购实现](shopping_agent/automation.py) · [降价触发与撤销测试](tests/test_workflows.py#L218)
 
 ## 12. 动手练习和读代码路线
 
@@ -303,7 +305,7 @@ Worker 领取作业时会给这项工作标记一个临时有效的**租约**。
 
 1. 在 `POST /v1/tasks` 点击 `Try it out` 并执行，记下返回的 `id`。
 2. 在 `POST /v1/tasks/{task_id}/turns` 填入这个 ID，提交下面的 JSON。
-3. 从返回结果复制轮次的 `id`，用 `GET /v1/runs/{run_id}` 查看。若仍在运行，过一会儿再查。完成后展开 `result.plans`，对照其中一个方案的 `items`、`quote.total` 和 `evidence`。把金额除以 100 再和页面比较。
+3. 从返回结果复制轮次的 `id`，用 `GET /v1/runs/{run_id}` 查看。若仍在运行，过一会儿再查。完成后展开 `result.plans`，对照其中一个方案的 `items`、`quote.total` 和 `evidence`。推荐理由和引用在 `result.recommendations`。把金额除以 100 再和页面比较。
 
 ```json
 {
@@ -313,29 +315,41 @@ Worker 领取作业时会给这项工作标记一个临时有效的**租约**。
 }
 ```
 
-还可以在 `result.trace.search` 分别找 `dock` 和 `laptop` 的排名。没配置 Chat 模型时，`trace.tools` 为空是正常的，确定性搜索和核价仍能运行。 [API 对应实现](shopping_agent/api.py#L183)
+还可以在 `result.trace.search` 分别找 `dock` 和 `laptop` 的排名。没配置 Chat 模型时，`trace.tools` 为空是正常的，确定性搜索和核价仍能运行。 [API 对应实现](shopping_agent/api.py#L206)
 
 ### 练习二 · 在一条测试里看清楚“收到退款预览”和“实际执行”的分界
 
-先读 `test_cart_revision_idempotency_and_split_return`。它先发两次同样的加购操作，再用旧版本发一个不同操作，接着购买一组跨卖家的商品。你可以在读到退货请求前先预测，哪个包裹允许申请退货，以及为什么重发确认会返回相同的 ID。然后对照断言。 [分包退货测试](tests/test_workflows.py#L192)
+先读 `test_cart_revision_idempotency_and_split_return`。它先发两次同样的加购操作，再用旧版本发一个不同操作，接着购买一组跨卖家的商品。你可以在读到退货请求前先预测，哪个包裹允许申请退货，以及为什么重发确认会返回相同的 ID。然后对照断言。 [分包退货测试](tests/test_workflows.py#L194)
 
 ### 练习三 · 用测试学会追踪一次故障
 
-先阅读购买断线恢复测试，找出它在哪一行注入 `lost_response`，在哪一行查询原有的购买尝试。然后运行下面这一条测试。它使用临时演示数据库和可控时钟。测试在重启后检查状态、订单数与支付流水数。 [购买断线恢复测试](tests/test_workflows.py#L168)
+先阅读购买断线恢复测试，找出它在哪一行注入 `lost_response`，在哪一行查询原有的购买尝试。然后运行下面这一条测试。它使用临时演示数据库和可控时钟。测试在重启后检查状态、订单数与支付流水数。 [购买断线恢复测试](tests/test_workflows.py#L170)
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_workflows.py::test_unknown_payment_recovers_once_and_orders_are_isolated
 ```
+
+### 练习四 · 用标注场景评估购物和检索
+
+```powershell
+.\.venv\Scripts\python.exe -m shopping_agent evaluate-journeys
+.\.venv\Scripts\python.exe -m shopping_agent evaluate --k 3
+```
+
+第一条命令在临时数据库回放 109 个英文购物场景，共 131 轮。场景用模拟目录和报价检查硬条件、首选方案、正确的评论证据和多轮条件保留。报告里的 p95 来自本机轮次回放。可以在 `results` 中找到每轮耗时和失败的断言。
+
+第二条命令单独测检索。Recall@3 看前三名找回了多少相关商品，MRR 看第一个相关结果出现在多前面，NDCG@3 还考虑相关性等级。即使两次检索找回了同样的商品，把更符合需求的商品排前面，NDCG 通常会更高。默认用例同时包含二元标注和 0–3 级标注。真实 Amazon Fashion 样本的导入和评估命令见 README。 [购物场景](fixtures/shopping_journeys.jsonl) · [检索标注](fixtures/search_cases.jsonl) · [Amazon Fashion 评估](README.md#import-amazon-reviews23)
 
 ### 按你想追踪的问题打开文件
 
 | 你想弄明白的问题 | 第一个文件 | 下一站 |
 |---|---|---|
 | Python 服务怎样从命令启动，网页从哪里来 | [__main__.py](shopping_agent/__main__.py) | CLI 用 Uvicorn 监听 HTTP，FastAPI 在 [api.py](shopping_agent/api.py) 声明接口并提供 [demo.html](shopping_agent/demo.html) |
-| “搜扩展坞”怎样变成一轮查询 | [api.py](shopping_agent/api.py#L199) | [runtime.py](shopping_agent/runtime.py#L35) → [graph.py](shopping_agent/graph.py#L196) |
-| 为什么某个商品出现在候选里，却没出现在可买方案里 | [catalog.py](shopping_agent/catalog.py#L127) | [planner.py](shopping_agent/planner.py#L96) |
-| 模型请求查评论时，谁真正执行工具 | [graph.py](shopping_agent/graph.py#L279) | [models.py](shopping_agent/models.py#L43) → [catalog.py](shopping_agent/catalog.py#L179) |
-| 按下确认按钮后，怎样防止重复下单 | [checkout.py](shopping_agent/checkout.py#L39) | [platform.py](shopping_agent/platform.py#L228) |
+| “搜扩展坞”怎样变成一轮查询 | [api.py](shopping_agent/api.py#L206) | [runtime.py](shopping_agent/runtime.py#L35) → [graph.py](shopping_agent/graph.py#L240) |
+| 为什么某个商品出现在候选里，却没出现在可买方案里 | [catalog.py](shopping_agent/catalog.py#L233) | [planner.py](shopping_agent/planner.py#L31) |
+| 模型请求查评论时，谁真正执行工具 | [graph.py](shopping_agent/graph.py#L355) | [models.py](shopping_agent/models.py#L44) → [catalog.py](shopping_agent/catalog.py#L307) |
+| 推荐理由怎样带着可核对的引用送到网页 | [recommendations.py](shopping_agent/recommendations.py#L94) | [runtime.py](shopping_agent/runtime.py#L86) → [api.py](shopping_agent/api.py#L230) |
+| 按下确认按钮后，怎样防止重复下单 | [checkout.py](shopping_agent/checkout.py#L45) | [platform.py](shopping_agent/platform.py#L290) |
 | 如何在没有网页的情况下证明业务规则有效 | [test_workflows.py](tests/test_workflows.py) | 顺着测试调用的 API 和 Worker 找对应实现 |
 
 第一次读代码，建议把这一行当作起点。找到 `POST /v1/tasks/{task_id}/turns`，依次追踪“谁保存输入”“谁执行这一轮”“谁返回最后结果”。等能在三个文件里找到这些位置，再把模型、数据库和平台调用加到自己的阅读路径中。

@@ -1,6 +1,6 @@
 # Shopping Agent V2 项目详解
 
-本文以源码提交 `851f639` 为基准。面向准备运行、阅读或扩展项目的开发者。英文启动说明见 [README](README.md)。
+本文面向准备运行、阅读或扩展项目的开发者，涵盖当前源码中的先筛选后精排、权威核价、任务轨迹与购物评估。英文启动说明见 [README](README.md)。
 
 - [1. 设计与运行方式](#1-设计与运行方式)
 - [2. 数据模型与存储](#2-数据模型与存储)
@@ -144,9 +144,9 @@ flowchart TD
 | 关键词 | Elasticsearch 在 `title^4`、`brand^2`、`variant^2`、`text` 上做 `multi_match`，用英文分析器，并对 `search_terms` 的命中加权。`tokens()` 保留形如 `USB-C`、`4K@60Hz` 的复合 token，并归一化少量英文同义词 |
 | 文本向量 | `Models.embeddings()` 生成查询向量，通过 `dense_vector` 的 `knn` 召回。索引显式配置 `hnsw` 与余弦相似度，`num_candidates` 按候选目标的四倍配置、最多 1,000 |
 | 图片向量 | 装有可选依赖、配置 `CLIP_MODEL`、重建时提供本地商品图片，且请求包含图片或外观词时生成 CLIP 查询向量。在规划器中当前仅用于单品类搜索 |
-| 融合与精排 | 先融合相同通道的改写结果，再在关键词、文本向量和可用的图片通道之间做 RRF。若配置 `RERANK_URL`，将融合候选交给外部接口，验证排序结果后应用；否则沿用融合排名 |
+| 融合与精排 | 先融合相同通道的改写结果，再做 RRF。购买方案的候选在回读目录后先校验单品硬条件。若配置 `RERANK_URL`，将通过检查的候选交给外部接口精排，否则沿用其融合排名 |
 
-RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，每个结果列表按文档 ID 去重。搜索服务会回读 Agent 数据库中的文档，并重新验证过滤条件。`trace.search` 给出 `keyword`、`semantic`、`fused`，使用图像通道时还有 `image`。在 Elasticsearch 模式，语义路失败时可保留关键词排名。关键词服务不可用会报告 `search_unavailable`。本机模式直接扫描小目录，在 Python 中算 BM25 和向量相似度。
+RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，每个结果列表按文档 ID 去重。搜索服务回读数据库中的文档，再按当前任务检查其资格。`trace.search` 给出各召回路、`fused`、`rejected`、`shortlist` 及阶段耗时。检索文本包含具体 SKU ID。在 Elasticsearch 模式，语义路失败时可保留关键词排名，关键词服务不可用时返回 `search_unavailable`。本机模式直接扫描小目录，在 Python 中算 BM25 和向量相似度。
 
 ### 4.2 模型和索引之间的数据流
 
@@ -162,10 +162,12 @@ RRF 按文档在每路的排名累加 `1 / (60 + rank)`，排名从 1 开始，�
 [`planner.py`](shopping_agent/planner.py) 实际交付的是在当前业务约束下可买的**方案**，而不是只按文本相关性列商品。
 
 1. `_pools()` 为各购买槽位并行取候选。固定的 SKU 会直接从目录读取，候选不足时整轮从每槽位 10 扩至 22。
-2. `_eligible()` 校验 SKU、最小内存和明确重量上限。只有商品组的目录数据仍能用于研究、展示和评论证据。
+2. `candidate_rejection()` 在精排前校验 SKU、最小内存、明确重量上限和可独立判断的视频能力。缺少可信规格或存在冲突的条目可进入研究卡片，并带着可诊断的原因排除在购买方案之外。
 3. `find()` 批量向平台获取候选 SKU 的 Offer，处理库存、USD 币种及自动化卖家授权限制。每个 SKU 按价格、送达时效和 ID 留最多三个 Offer。历史方案固定项会继续绑定原 Offer。
-4. `compatibility()` 从具体笔记本 SKU 或澄清取得主机视频协议和级别，核对扩展坞输入要求与目标接口上的 4K 刷新率。若购买显示器，它的接口也进入校验。成功结果包含带来源和版本的规格证据。关键规格缺失时无法建立可买的已认证组合。
-5. `_pairs()` 在槽位内组合候选，按粗略预算命中、重量或相关性及估算价取前 22 组。估算价用来排序。`_price()` 再并行获取平台报价，校验实际总价、最晚到货时间、Offer 和 SKU 绑定，并按 SKU 组合去重，最多展示三套。
+4. `compatibility()` 从具体笔记本 SKU、用户明确声明的主机能力或澄清取得视频协议和级别，核对扩展坞输入要求与目标接口上的 4K 刷新率。若购买显示器，它的接口也进入校验。成功结果包含带来源和版本的规格证据。只有显示器规格时，系统会追问主机能力。
+5. `_pairs()` 用估算成本和用户偏好限制核价规模。`_price()` 并行获取最多 22 组平台报价，校验实际总价、最晚到货时间、Offer 和 SKU 绑定。通过校验的方案按 `sort_by` 排序，价格和送达依据实时报价，轻便模式优先可信重量。最后按 SKU 组合去重并展示最多三套。
+
+供受信任目录同步写入的 `spec_claims` 可以补充某一具体 SKU 的权威来源。每项应给出 `field`、`value`、`source` 和 `authoritative`。两个权威记录必须比较同一字段的完整值。例如两个扩展坞 `inputs` 记录分别声明 HDMI 4K 的最高刷新率为 60 Hz 和 30 Hz，系统会记录 `conflicting_inputs`，并在没有其他合格组合时提示规格冲突。Reviews’23 的商品描述与评论不会写入这一来源字段。
 
 例如，`air-16` 和 `air-8` 都叫 Aurora Air 14。演示目录中的 `air-16` 声明 `dp_alt: 14`，可与要求该级别且支持 4K 60Hz 的扩展坞配对；`air-8` 的视频能力为空。`link-lite` 可输出 4K 30Hz，即使标价低，也不满足 60Hz 约束。
 
@@ -185,7 +187,7 @@ Agent 业务通过 `platform.call(tool_name, arguments)` 访问平台。[`platfo
 | HTTP | `POST {PLATFORM_URL}/tools/{name}`，请求正文直接是业务参数 |
 | MCP | 连接 `PLATFORM_URL` 指向的 Streamable HTTP `/mcp`，初始化 MCP session，再执行 `call_tool(name, {"payload": args})` |
 
-远程调用携带 `Authorization: Bearer <PLATFORM_TOKEN>`。平台工具返回含 `ok` 的统一 envelope。成功结果在 `value`，业务错误在 `error`，带 `code`、`message` 和 `status`。`RemotePlatform.call()` 解包结果。传输失败、解析失败或意外 envelope 会变成服务错误，交给上层处理。MCP 资源由 `FastMCP` 的会话管理器初始化，服务注册每个工具的输入模型与结构化输出。
+远程调用携带 `Authorization: Bearer <PLATFORM_TOKEN>`。平台工具返回含 `ok` 的统一 envelope。成功结果在 `value`，业务错误在 `error`，带 `code`、`message` 和 `status`。`RemotePlatform.call()` 解包结果并验证 Offer、购物车与订单等关键响应。传输失败、解析失败或意外 envelope 会变成服务错误，交给上层处理。MCP 资源由 `FastMCP` 的会话管理器初始化，服务注册每个工具的输入模型与结构化输出。
 
 | 平台工具 | 当前业务语义 |
 |---|---|
@@ -296,6 +298,8 @@ sequenceDiagram
 
 `evaluate` 消费 `fixtures/search_cases.jsonl` 形式的标签。每行提供 `query`、可选 `category`、以及标注为相关的文档 ID 数组 `relevant`。输出每条查询的排名、关键词与语义通道的候选、Recall@K 和倒数排名，还输出均值与 MRR。默认有三条合成目录检索用例。正式评估可换成带英文查询和人工相关性标注的样本。
 
+`evaluate-journeys` 在独立的临时数据库回放 `fixtures/shopping_journeys.jsonl`。它记录意图准确率、约束提取准确率、Top K 合格组合命中率、已标注硬条件通过率、多轮保留率，以及整轮与各阶段的 p50/p95。合格组合命中率只统计标有可行组合的轮次，结果为空计为未命中。默认 20 个英文场景覆盖 28 轮，耗时来自本机演示数据。`--with-models` 可以测现有模型配置，评估仍使用独立种子数据。
+
 ## 9. API 速查
 
 浏览器或 API 客户端通过 `Authorization: Bearer demo-alex` 或 `demo-sam` 使用本地演示身份。正常账户通过 JWT 的 `sub` 绑定，后端验证 HS256、`exp`、颁发者和 audience。配置了 Redis 时，提交购物轮次受每账户每 60 秒 35 次的窗口限流。`Fault` 转为带 `code` 与 `message` 的 HTTP 错误。跨账户的内部记录查找按 `owner` 限定，常见结果是 `404`。
@@ -308,6 +312,7 @@ sequenceDiagram
 | `POST /v1/tasks` · `GET /v1/tasks` · `GET /v1/tasks/{task_id}` | 创建、列出和读取账户的购物任务 |
 | `POST /v1/tasks/{task_id}/turns` | 接受英文轮次，返回运行 ID。可传地址、时区、任务版本、方案版本及图片 |
 | `GET /v1/runs/{run_id}` | 读取一轮任务的进度、结果或澄清问题 |
+| `GET /v1/tasks/{task_id}/trace` | 返回发起者账户范围内的任务事件。通过 `run_id`、`plan_id` 和版本连接搜索、修改、选择方案加购、报价和结算 |
 | `GET /v1/runs/{run_id}/events` | SSE 进度流，支持 `Last-Event-ID` |
 | `POST /v1/runs/{run_id}/clarification` | 提交指定 `interrupt_id` 的回复 |
 | `GET /v1/catalog/search?q=...` | 搜索商品文档，可带 `category` |
@@ -332,7 +337,8 @@ sequenceDiagram
 | 文件 | 类和函数 | 阅读要点 |
 |---|---|---|
 | [`__init__.py`](shopping_agent/__init__.py) | 包定义 | 标识 `shopping_agent` Python 包 |
-| [`__main__.py`](shopping_agent/__main__.py) | `main()`、`evaluate()` | 加载环境配置和日志，分发 `api`、`platform`、`worker`、`reindex`、`import-reviews23`、`evaluate`。评估调用实际目录入口并计算 Recall 与 MRR |
+| [`__main__.py`](shopping_agent/__main__.py) | `main()`、`evaluate()` | 加载环境配置和日志，分发服务、索引、导入及两类评估命令。单品评估调用实际目录入口并计算 Recall 与 MRR |
+| [`evaluation.py`](shopping_agent/evaluation.py) | `evaluate_journeys()`、`_run_cases()`、`_grade_turn()` | 在独立数据库回放英文任务，按标签验证约束、保留项和合格组合，汇总阶段耗时 |
 | [`core.py`](shopping_agent/core.py) | `Settings.from_env()`、`Fault`、`Input`、`Line` | 环境变量、业务错误和统一输入类。`Input` 去掉字符串首尾空白并拒绝多余字段 |
 | 同上 | `normalize_lines()`、`new_id()`、`stable_id()`、`timestamp()`、`iso()`、`cash()` | 标准化 Offer 行，生成随机或可重放的 ID，统一时间和美元字符串 |
 | [`storage.py`](shopping_agent/storage.py) | `Store.initialize()`、`transaction()`、`get()`、`list()` | 建表、数据库特性、事务边界和简单读操作 |
@@ -360,7 +366,7 @@ Worker 四组处理器分别绑定 `Runs.step`、`Checkout.step`、`Automations.
 | 同上 | `_request()`、`_elastic_search()`、`hybrid()`、`search()`、`evidence()` | 组装 Elasticsearch 查询、合并召回并暴露商品和证据入口 |
 | 同上 | `rebuild()` | 新建目录与证据索引，批量写入并切换别名 |
 | [`planner.py`](shopping_agent/planner.py) | `compatibility()`、`Planner.quote()` | 比较主机、扩展坞与显示器能力，验证平台报价 |
-| 同上 | `find()`、`_pools()`、`_eligible()`、`_public()` | 按购买槽位收集可买候选，保留可用于展示的目录字段 |
+| 同上 | `find()`、`_pools()`、`candidate_rejection()`、`specification()`、`_public()` | 按槽位收集候选，精排前验证单品和来源冲突，保留用于展示的目录字段 |
 | 同上 | `_pairs()`、`_price()` | 有界组合、重新报价、按硬约束淘汰及最终去重 |
 | [`dataset.py`](shopping_agent/dataset.py) | `records()`、`batches()`、`import_reviews23()` | 流式读取、分批入库和导入统计 |
 | 同上 | `metadata_document()`、`review_document()`、`identifier()`、`strings()`、`read_details()`、`image_rows()`、`snapshot_price()`、`category_for()` | 外部字段清洗、图片格式归一化、美元分快照、分类与文档映射 |
@@ -398,6 +404,7 @@ Worker 四组处理器分别绑定 `Runs.step`、`Checkout.step`、`Automations.
 | [`.gitignore`](.gitignore) · [`.dockerignore`](.dockerignore) | 将开发环境、本机数据和构建缓存排除在版本库或镜像构建上下文之外 |
 | [`fixtures/reviews23_meta.jsonl`](fixtures/reviews23_meta.jsonl) · [`fixtures/reviews23_reviews.jsonl`](fixtures/reviews23_reviews.jsonl) | 两种元数据与评论形状的合成样本 |
 | [`fixtures/search_cases.jsonl`](fixtures/search_cases.jsonl) | 目录搜索的默认英文查询和相关文档标签 |
+| [`fixtures/shopping_journeys.jsonl`](fixtures/shopping_journeys.jsonl) | 对话、追问、组合和排序的回放用例及期望 |
 | [`tests/test_workflows.py`](tests/test_workflows.py) | HTTP、状态恢复、平台传输和故障场景的集成测试 |
 
 ## 11. 本地复现与测试
@@ -467,6 +474,7 @@ $result | ConvertTo-Json -Depth 12
 ```powershell
 .\.venv\Scripts\python.exe -m shopping_agent import-reviews23 --metadata .\fixtures\reviews23_meta.jsonl --reviews .\fixtures\reviews23_reviews.jsonl
 .\.venv\Scripts\python.exe -m shopping_agent evaluate --cases .\fixtures\search_cases.jsonl --k 5
+.\.venv\Scripts\python.exe -m shopping_agent evaluate-journeys
 ```
 
 换成官方文件时，给 `--metadata` 和 `--reviews` 指定本地路径，可通过 `--products` 和 `--reviews-per-product` 控制子集。Elasticsearch 模式在导入后执行 `python -m shopping_agent reindex`。Compose 使用 `docker compose run --rm indexer reindex`，导入的容器挂载命令见 [README](README.md#import-amazon-reviews23)。
@@ -487,8 +495,16 @@ $result | ConvertTo-Json -Depth 12
 | `test_reviews23_import_is_repeatable_and_orderable_data_stays_separate` | 稳定导入、搜索、评论关联、快照价格和未映射 SKU |
 | `test_search_scope_automation_and_scheduled_cart_are_bounded` | 定时加购只执行已允许的 SKU 和卖家 |
 | `test_real_streamable_http_mcp_and_http_contract` | 回环 HTTP 与 MCP 的真实互通及未授权请求拒绝 |
+| `test_hard_constraints_filter_before_sku_rerank` | 8 GB 和 4K 30 Hz 候选提前淘汰，满足预算与规格的组合进入结果 |
+| `test_final_order_uses_authoritative_quote_instead_of_offer_estimate` | 平台优惠使实际应付更低时，最低价排序随实时报价更新 |
+| `test_conflicting_authoritative_specs_are_never_sold_as_compatible` | 权威规格冲突时提示证据不足并排除购买方案 |
+| `test_model_and_monitor_cannot_supply_unstated_laptop_capability` | 输入只有显示器规格时，即使模型给出主机能力也会请求澄清 |
+| `test_listing_and_review_instructions_cannot_trigger_commerce_writes` | 恶意商品描述和评论进入只读工具数据，模型无法发起交易写入 |
+| `test_one_account_can_trace_refinement_through_cart_and_checkout` | 两轮研究、加购、报价和订单共享可追踪的账户范围和方案版本 |
+| `test_remote_platform_rejects_malformed_business_records` | 拒绝畸形平台 Offer、购物车和订单响应 |
+| `test_english_journey_benchmark` | 英文评估集可重放，产生独立的准确率、命中和耗时指标 |
 
-交付时，这 10 项测试均通过。另通过 Compose 验证了真实 Elasticsearch 两路召回、平台 MCP 报价、SSE、PostgreSQL 检查点跨 Worker 重启恢复、模拟支付成功后的丢响应恢复，以及独立 Worker 接收平台价格事件并写站内通知。官方 `Electronics` 的小样本验证了字段解析，成对关联用项目的合成样本验证。
+除自动化测试之外，项目最初通过 Compose 验证了真实 Elasticsearch 两路召回、平台 MCP 报价、SSE、PostgreSQL 检查点跨 Worker 重启恢复、模拟支付成功后的丢响应恢复，以及独立 Worker 接收平台事件。官方 `Electronics` 的小样本验证了字段解析，成对关联用项目的合成样本验证。
 
 ## 12. 当前实现边界与排查
 

@@ -6,10 +6,11 @@ import math
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import perf_counter
 
 import httpx
 
-from .core import Fault, new_id, stable_id
+from .core import Fault, elapsed_ms, new_id, stable_id
 from .models import tokens
 
 LOG = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ def document_text(doc):
     if doc.get("kind") == "review":
         return doc["text"]
     fields = [doc.get("title"), doc.get("brand"), doc.get("category"), doc.get("variant"),
-              doc.get("external_id"), doc.get("description")]
+              doc.get("sku_id"), doc.get("external_id"), doc.get("description")]
     fields.extend(doc.get("category_path", []))
     fields.extend(json.dumps(doc.get(field, {}), ensure_ascii=False)[:1800] for field in ("specs", "details"))
     return " ".join(str(value) for value in fields if value)[:10000]
@@ -124,7 +125,8 @@ class Catalog:
             raise
         return [row["_id"] for row in hits]
 
-    def hybrid(self, bucket, query, filters, *, alternates=(), limit=12, pool=40, visual=None):
+    def hybrid(self, bucket, query, filters, *, alternates=(), limit=12, pool=40, visual=None, reject=None):
+        started = perf_counter()
         queries = list(dict.fromkeys([query, *alternates]))[:3]
         size = max(limit, pool)
         if self.settings.elastic_url:
@@ -164,17 +166,35 @@ class Catalog:
             keys = rankings(lists)[:size]
             by_key = {doc["id"]: doc for doc in docs}
             docs = [by_key[key] for key in keys]
-        rank_order = self.models.rerank(query, [document_text(doc) for doc in docs])
-        traces = {"keyword": lists[0][:size], "semantic": lists[1][:size], "fused": keys}
+        timings = {"retrieval": elapsed_ms(started)}
+        traces = {"keyword": lists[0][:size], "semantic": lists[1][:size], "fused": keys, "timings_ms": timings}
         if len(lists) == 3:
             traces["image"] = lists[2][:size]
-        return [docs[i] for i in rank_order[:limit]], traces
+        if reject is not None:
+            started = perf_counter()
+            eligible, rejected = [], []
+            for doc in docs:
+                reason = reject(doc)
+                if reason:
+                    rejected.append({"id": doc["id"], "reason": reason})
+                else:
+                    eligible.append(doc)
+            docs = eligible
+            timings["eligibility"] = elapsed_ms(started)
+            traces["rejected"] = rejected
+        started = perf_counter()
+        rank_order = self.models.rerank(query, [document_text(doc) for doc in docs]) if docs else []
+        selected = [docs[i] for i in rank_order[:limit]]
+        timings["rerank"] = elapsed_ms(started)
+        traces["shortlist"] = [doc["id"] for doc in selected]
+        return selected, traces
 
-    def search(self, query, category=None, *, alternates=(), limit=12, pool=40, visual=None):
+    def search(self, query, category=None, *, alternates=(), limit=12, pool=40, visual=None, reject=None):
         filters = {"active": True, "market": "US"}
         if category:
             filters["category"] = category
-        return self.hybrid("catalog", query, filters, alternates=alternates, limit=limit, pool=pool, visual=visual)
+        return self.hybrid("catalog", query, filters, alternates=alternates, limit=limit, pool=pool, visual=visual,
+                           reject=reject)
 
     def evidence(self, product_ids, query, limit=8):
         if not product_ids:

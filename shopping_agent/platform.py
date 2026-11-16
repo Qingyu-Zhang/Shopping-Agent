@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
 import httpx
-from pydantic import Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from .core import Fault, Input, Line, Settings, new_id, normalize_lines, stable_id, timestamp
 from .seed import seed_platform
@@ -104,6 +104,67 @@ class ToolEnvelope(Input):
     error: dict | None = None
 
 
+class PlatformRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class OfferRecord(PlatformRecord):
+    id: str = Field(min_length=1)
+    sku_id: str = Field(min_length=1)
+    seller: str = Field(min_length=1)
+    unit_price: int = Field(strict=True, ge=0)
+    shipping: int = Field(strict=True, ge=0)
+    stock: int = Field(strict=True, ge=0)
+    lead_hours: int = Field(strict=True, ge=0)
+    currency: str = Field(min_length=3, max_length=3)
+
+
+class CartRecord(PlatformRecord):
+    version: int = Field(strict=True, ge=0)
+    lines: list[Line] = Field(max_length=20)
+
+
+class ParcelRecord(PlatformRecord):
+    id: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    eta: float = Field(allow_inf_nan=False)
+    offer_ids: list[str]
+
+
+class OrderLineRecord(PlatformRecord):
+    offer_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    quantity: int = Field(strict=True, ge=1)
+
+
+class OrderRecord(PlatformRecord):
+    id: str = Field(min_length=1)
+    account_id: str = Field(min_length=1)
+    total: int = Field(strict=True, ge=0)
+    currency: str = Field(min_length=3, max_length=3)
+    lines: list[OrderLineRecord]
+    parcels: list[ParcelRecord]
+
+
+TOOL_RESULTS = {
+    "commerce_offers": TypeAdapter(list[OfferRecord]),
+    "commerce_cart": TypeAdapter(CartRecord),
+    "commerce_cart_write": TypeAdapter(CartRecord),
+    "commerce_orders": TypeAdapter(list[OrderRecord]),
+    "commerce_order": TypeAdapter(OrderRecord),
+}
+
+
+def validate_tool_result(name, value):
+    schema = TOOL_RESULTS.get(name)
+    if schema:
+        try:
+            return schema.dump_python(schema.validate_python(value))
+        except ValidationError as error:
+            raise Fault("platform_protocol", "The commerce platform returned an invalid record.", 502) from error
+    return value
+
+
 TOOL_INPUTS = {
     "commerce_account": AccountRequest,
     "commerce_offers": OfferRequest,
@@ -132,7 +193,8 @@ class MockPlatform:
     def call(self, name: str, arguments: dict):
         if name not in TOOL_INPUTS:
             raise Fault("unknown_tool", "This platform tool does not exist.", 404)
-        return getattr(self, name.removeprefix("commerce_"))(TOOL_INPUTS[name].model_validate(arguments))
+        value = getattr(self, name.removeprefix("commerce_"))(TOOL_INPUTS[name].model_validate(arguments))
+        return validate_tool_result(name, value)
 
     def account(self, req):
         with self.store.transaction() as tx:
@@ -400,7 +462,7 @@ class RemotePlatform:
                 response.raise_for_status()
                 envelope = response.json()
             if isinstance(envelope, dict) and envelope.get("ok") is True and "value" in envelope:
-                return envelope["value"]
+                return validate_tool_result(name, envelope["value"])
             if isinstance(envelope, dict) and envelope.get("ok") is False:
                 failure = envelope["error"]
                 raise Fault(failure["code"], failure["message"], failure["status"])

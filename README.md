@@ -38,7 +38,7 @@ Copy `.env.example` to `.env` as needed. Set `MODEL_URL` to a compatible API bas
 
 Set `EMBEDDING_MODEL` with an embeddings endpoint to use semantic text vectors. Set `RERANK_URL` and `RERANK_MODEL` for a `POST /rerank` service returning indexed relevance scores. Local defaults use English parsing, BM25 and a deterministic demo vector. The fallback supports the built-in scenarios and regression tests. Real models are configurable.
 
-Elasticsearch uses separate aliases for SKU search and review evidence. The keyword and dense-vector searches run in parallel and RRF fuses their ranks before optional reranking. Index mappings specify English text analysis and HNSW. The index command reuses cached vectors by model, endpoint and document text, bulk-writes a new index, and publishes both aliases after a successful build. Update or remove catalog records through the catalog ingest source and rerun indexing. Retain or clean up old index generations according to deployment needs.
+Elasticsearch uses separate aliases for SKU search and review evidence. Keyword and dense-vector searches run in parallel and RRF fuses their ranks. The bundle planner checks known SKU requirements before optional reranking and shortlisting, including RAM, weight, dock output and host capability. It checks the selected products together, then validates platform quotes against the budget and delivery deadline. Final ordering uses quoted totals and arrival times with the user's price, weight or delivery preference. Index mappings specify English text analysis and HNSW. Run the index command after catalog changes or to include SKU identifiers in an existing index. The command bulk-writes both new indices before switching their aliases.
 
 For visual search, install `.[vision]`, set `CLIP_MODEL`, and reindex with `--images PATH`. Supply local images named by catalog document ID with a JPEG, PNG or WebP extension. Specific appearance requests or an `image_base64` turn field can trigger the optional image route. VLM reranking and IVF comparisons are future evaluation work.
 
@@ -68,6 +68,7 @@ Metadata and reviews join on `parent_asin`. A child review ASIN remains a source
 |---|---|
 | Research and refinement | `POST /v1/tasks`, then `POST /v1/tasks/{task_id}/turns`. Include `expected_version` and the displayed `plan_version` for edits. |
 | Progress and clarification | `GET /v1/runs/{run_id}` or `GET /v1/runs/{run_id}/events` with optional `Last-Event-ID`. Reply to a pending interruption at `POST /v1/runs/{run_id}/clarification`. |
+| Task trace | `GET /v1/tasks/{task_id}/trace` lists account-scoped events from research through a cart change, quote and checkout linked to a selected plan. The run result includes stage timings and candidate rejection reasons. |
 | Compare, cart and checkout | The run or task includes structured plans. Submit the selected plan and its version to `/v1/cart/changes` or `/v1/quotes`. Confirm a quote by posting its exact `terms` value to `/v1/quotes/{id}/confirm`, then poll the checkout attempt. |
 | Order and returns | `GET /v1/orders` shows per-seller parcels. Preview a return on the delivered line, then confirm the preview and reason. |
 | Price tracking and replenishment | `POST /v1/automations` binds exact offers or a saved search to a price, stock or schedule trigger. Search-based cart and purchase rules require explicitly allowed SKUs and sellers. Read the rules and execution history, revoke rules, and see in-app notices. |
@@ -82,6 +83,9 @@ In local mode the Agent exposes demo controls under `/demo`. In Compose the sand
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m shopping_agent evaluate-journeys
 ```
 
 The tests exercise the HTTP API, English bundle edits, SQLite checkpoint recovery, provider-style tool calling, strict quote confirmation, lost payment recovery, account isolation, cart and return idempotency, background authorization and deduplication, Reviews’23 ingestion, and the real MCP transport over loopback. The separate Compose stack is the PostgreSQL, Elasticsearch and Redis integration path.
+
+`evaluate-journeys` replays 20 labeled English shopping journeys in temporary seeded databases. It reports intent and constraint extraction, eligible bundle hit rate, returned-plan constraint satisfaction, preservation of earlier constraints and selected offers, and p50/p95 timings. It exits with a nonzero status when a labeled check fails. Use `--cases` to supply compatible labels and `--with-models` to exercise configured model services. The default run uses deterministic demo data and model fallbacks.

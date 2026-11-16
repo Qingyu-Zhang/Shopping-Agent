@@ -4,18 +4,21 @@ from .core import Fault, new_id, normalize_lines, stable_id
 from .platform import Quote, quote_fingerprint
 
 
-def store_quote(tx, quote, now, *, constraints=None):
+def store_quote(tx, quote, now, *, constraints=None, selection_trace=None):
     receipt = {
         "id": new_id(), "quote": quote, "terms": quote_fingerprint(quote),
         "created_at": now, "constraints": constraints or {},
     }
+    if selection_trace:
+        receipt["selection_trace"] = selection_trace
     tx.put("quotes", receipt["id"], receipt, owner=quote["account_id"])
     return receipt
 
 
-def audit(tx, account, event, reference, now, **details):
-    key = new_id()
-    tx.put("audit", key, {"id": key, "event": event, "reference": reference, "at": now, **details}, owner=account)
+def audit(tx, account, event, reference, now, *, once=False, **details):
+    key = stable_id(account, event, reference) if once else new_id()
+    tx.put("audit", key, {"id": key, "event": event, "reference": reference, "at": now, **details},
+           owner=account, once=once)
 
 
 class Checkout:
@@ -23,7 +26,7 @@ class Checkout:
         self.store, self.platform, self.planner = store, platform, planner
         self.settings, self.clock = settings, clock
 
-    def prepare(self, account, address, lines, *, constraints=None, expected_skus=None):
+    def prepare(self, account, address, lines, *, constraints=None, expected_skus=None, selection_trace=None):
         quote = self.planner.quote(account, address, normalize_lines(lines), expected_skus=expected_skus)
         now = self.clock()
         if quote["expires_at"] <= now:
@@ -34,7 +37,10 @@ class Checkout:
         if limits.get("deadline") and quote["eta"] > limits["deadline"]:
             raise Fault("delivery_changed", "The updated delivery estimate misses the deadline.")
         with self.store.transaction(True) as tx:
-            return store_quote(tx, quote, now, constraints=constraints)
+            receipt = store_quote(tx, quote, now, constraints=constraints, selection_trace=selection_trace)
+            audit(tx, account, "quote_prepared", receipt["id"], now, platform_quote_id=quote["id"],
+                  **(selection_trace or {}))
+            return receipt
 
     def confirm(self, account, receipt_id, terms):
         with self.store.transaction(True) as tx:
@@ -63,7 +69,8 @@ class Checkout:
         row = {"id": key, "account_id": account, "receipt_id": receipt["id"], "state": "processing",
                "created_at": now, "updated_at": now, "tries": 0, "automation_run": automation}
         tx.put("checkouts", key, row, owner=account, state="pending", due=now, once=True)
-        audit(tx, account, "checkout_accepted", key, now, receipt_id=receipt["id"], automation_run=automation)
+        audit(tx, account, "checkout_accepted", key, now, receipt_id=receipt["id"], automation_run=automation,
+              **receipt.get("selection_trace", {}))
         return row
 
     def step(self, row, lease):
@@ -114,14 +121,17 @@ class Checkout:
             state = result["state"]
             current.update(state=state, code=result.get("code"), order_id=result.get("order_id"))
             if state == "requote":
-                new = store_quote(tx, replacement, now, constraints=receipt.get("constraints"))
+                new = store_quote(tx, replacement, now, constraints=receipt.get("constraints"),
+                                  selection_trace=receipt.get("selection_trace"))
                 current["replacement"] = new
             tx.put("checkouts", row["id"], current, owner=account, state="finished")
             if run_id := current.get("automation_run"):
                 execution = tx.require("automation_runs", run_id, account, lock=True)
                 execution.update(state=state, order_id=current.get("order_id"))
                 tx.put("automation_runs", run_id, execution, owner=account)
-            audit(tx, account, "checkout_" + state, row["id"], now, code=current.get("code"))
+            audit(tx, account, "checkout_" + state, row["id"], now, code=current.get("code"),
+                  receipt_id=receipt["id"], order_id=current.get("order_id"),
+                  **receipt.get("selection_trace", {}))
 
     def preview_return(self, account, order_id, offer_id, quantity):
         args = {"account_id": account, "order_id": order_id, "offer_id": offer_id, "quantity": quantity}

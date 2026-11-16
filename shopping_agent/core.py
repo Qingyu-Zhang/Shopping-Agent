@@ -4,6 +4,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import perf_counter
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,6 +44,10 @@ def stable_id(*parts: str) -> str:
 
 def timestamp() -> float:
     return datetime.now(UTC).timestamp()
+
+
+def elapsed_ms(start: float) -> float:
+    return round((perf_counter() - start) * 1000, 3)
 
 
 def iso(value: float) -> str:

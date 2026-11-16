@@ -127,6 +127,7 @@ class Runs:
                 if not result.get("preserve_plans"):
                     task["plans"] = result["plans"]
                     task["goal"] = state["goal"]
+                    task["plan_run_id"] = key
                 task.update(version=next_version, updated_at=self.clock())
                 if action:
                     result = {**result, "suggested_action": action}
@@ -134,7 +135,8 @@ class Runs:
                 self.add_event(current, "completed")
                 tx.put("tasks", task["id"], task, owner=account)
                 tx.put("task_views", stable_id(task["id"], str(next_version)), task, owner=account)
-                audit(tx, account, "turn_completed", key, self.clock(), task_id=task["id"], version=next_version)
+                audit(tx, account, "turn_completed", key, self.clock(), task_id=task["id"], run_id=key,
+                      version=next_version, action=result.get("trace", {}).get("action"))
             tx.put("runs", key, current, owner=account, state="finished")
 
     def _finish(self, row, lease, state, **fields):

@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from decimal import Decimal
+from time import perf_counter
 from typing import Literal, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -14,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import Field, ValidationError
 
-from .core import Fault, Input, cash, iso
+from .core import Fault, Input, cash, elapsed_ms, iso
 
 LOG = logging.getLogger(__name__)
 CATEGORIES = {
@@ -40,6 +41,7 @@ class Patch(Input):
     categories: list[Category] = Field(default_factory=list, max_length=3)
     budget: int | None = Field(default=None, ge=1, le=100_000_000)
     light: bool | None = None
+    sort_by: Literal["price", "weight", "delivery", "relevance"] | None = None
     max_weights: dict[Category, int] = Field(default_factory=dict)
     min_ram: int | None = Field(default=None, ge=1, le=1024)
     hz: int | None = Field(default=None, ge=1, le=1000)
@@ -78,6 +80,11 @@ def detect(text, current, now, zone):
     normalized = text.lower()
     request = normalized.split("\nclarification: ", 1)[0]
     categories = [category for category, pattern in CATEGORIES.items() if re.search(pattern, request)]
+    existing_host = r"\b(?:my|existing|current) (?:laptop|notebook|computer)\b"
+    if "dock" in categories and "laptop" in categories and not re.search(
+        CATEGORIES["laptop"], re.sub(existing_host, "", request)
+    ):
+        categories.remove("laptop")
     if "monitor" in categories and re.search(r"\b(?:drive|connect|output|hook up|work with|use with|dock for)\b.{0,38}\b(?:monitor|display)", request):
         categories.remove("monitor")
     option = re.search(rf"\b(?:option|plan|bundle)\s+(?:number\s+)?({WORDS})\b|\b({WORDS})\s+(?:one|option|plan|bundle)\b",
@@ -97,14 +104,17 @@ def detect(text, current, now, zone):
         action = "checkout"
     elif re.search(r"\b(compare|difference between)\b", normalized):
         action = "compare"
-    budget = re.search(r"\b(?:under|budget(?: of)?|up to|at most|no more than|less than|below)\s+" + DOLLARS, normalized)
+    budget = re.search(r"\b(?:under|budget(?: of| to)?|up to|at most|no more than|less than|below)\s+" + DOLLARS, normalized)
     target = re.search(r"\b(?:drops? to|falls? to|goes below|price (?:drops? )?below)\s+" + DOLLARS, normalized)
     if action == "watch" and categories and not current and not option:
         action = "search"
     hz = re.search(r"\b4k\s*(?:at\s*|@\s*)?(\d{2,3})\s*hz\b", normalized)
     ram = re.search(r"\b(\d{1,3})\s*gb(?:\s+of)?\s+(?:ram|memory)\b", normalized)
+    port_request = request
+    if re.search(existing_host, request) or "alt mode" in request:
+        port_request = re.sub(r"\b(?:displayport|dp)\s+1[.]\d\b", "", request)
     ports = [key for key, pattern in (("hdmi", r"\bhdmi\b"), ("dp", r"\b(displayport|dp)\b"))
-             if re.search(pattern, request)]
+             if re.search(pattern, port_request)]
     keep, replacement = [], None
     for category, pattern in CATEGORIES.items():
         if re.search(r"\b(?:keep|retain)\b[^,.]{0,38}" + pattern, normalized):
@@ -138,10 +148,25 @@ def detect(text, current, now, zone):
             when = date.replace(hour=hour, minute=minute, second=59 if not match[2] else 0,
                                 microsecond=0).timestamp()
     host = {}
-    if found := re.search(r"\b(?:dp|displayport)\s*1[.](\d)\b", normalized):
+    if "\nclarification: " in normalized:
+        host_text = normalized.rsplit("\nclarification: ", 1)[1]
+    else:
+        host_claim = re.search(rf"(?:{existing_host}|\bmy host\b)\s+(?:supports?|has|provides|uses)\s+(.{{1,100}})",
+                               request)
+        host_text = host_claim[1] if host_claim else ""
+    if found := re.search(r"\b(?:dp|displayport)\s*1[.](\d)\b", host_text):
         host["dp_alt"] = 10 + int(found[1])
-    if found := re.search(r"\bthunderbolt\s*(\d)\b", normalized):
+    if found := re.search(r"\bthunderbolt\s*(\d)\b", host_text):
         host["thunderbolt"] = int(found[1])
+    sort_by = None
+    if re.search(r"\b(?:cheapest|least expensive|lowest (?:total|price|cost)|lowest-priced)\b", request):
+        sort_by = "price"
+    elif re.search(r"\b(?:(?:fastest|earliest|quickest) (?:delivery|arrival)|arrives? (?:first|soonest))\b", request):
+        sort_by = "delivery"
+    elif re.search(r"\b(?:lightest|as light as possible|prioritize (?:low )?weight)\b", request):
+        sort_by = "weight"
+    elif "ignore weight" in request:
+        sort_by = "relevance"
     patch = Patch(
         action=action, categories=categories[:3], budget=amount(budget[1]) if budget else None,
         light=False if "ignore weight" in request else (
@@ -151,6 +176,7 @@ def detect(text, current, now, zone):
         max_weights=weights, hz=int(hz[1]) if hz and int(hz[1]) else None, ports=ports,
         reference=number(option[1] or option[2]) if option else None,
         keep=keep, replace=replacement, target=amount(target[1]) if target else None, host_video=host or None,
+        sort_by=sort_by,
     )
     return patch, when
 
@@ -175,6 +201,8 @@ class TurnState(TypedDict, total=False):
     fixed: dict
     queries: dict
     tool_trace: list[dict]
+    understand_ms: float
+    research_ms: float
     result: dict
 
 
@@ -194,6 +222,7 @@ class ShoppingGraph:
         self.graph = builder.compile(checkpointer=checkpointer)
 
     def understand(self, state):
+        started = perf_counter()
         text, previous = state["text"], state.get("previous", {})
         zone = ZoneInfo(state.get("timezone", "America/New_York"))
         patch, when = detect(text, previous, state["now"], zone)
@@ -213,7 +242,7 @@ class ShoppingGraph:
                 proposed = Patch.model_validate_json(message["content"])
                 changes = patch.model_dump()
                 for key, value in proposed.model_dump(exclude_unset=True, exclude_none=True).items():
-                    if not changes.get(key) and value:
+                    if key != "host_video" and not changes.get(key) and value:
                         changes[key] = value
                 if patch.action == "search":
                     changes["action"] = proposed.action
@@ -230,7 +259,7 @@ class ShoppingGraph:
         goal["address_id"] = state["address"]
         if when:
             goal["deadline"] = when
-        for key in ("budget", "light", "min_ram", "hz", "host_video"):
+        for key in ("budget", "light", "sort_by", "min_ram", "hz", "host_video"):
             if getattr(patch, key) is not None:
                 goal[key] = getattr(patch, key)
         if patch.ports:
@@ -260,7 +289,8 @@ class ShoppingGraph:
         if selected and (patch.keep or patch.replace):
             fixed = {item["category"]: item for item in selected["items"]
                      if item["category"] != patch.replace and (patch.replace or item["category"] in patch.keep)}
-        return {"patch": patch.model_dump(), "goal": goal, "selected": selected, "clarification": question, "fixed": fixed}
+        return {"patch": patch.model_dump(), "goal": goal, "selected": selected, "clarification": question,
+                "fixed": fixed, "understand_ms": elapsed_ms(started)}
 
     @staticmethod
     def route(state):
@@ -277,8 +307,9 @@ class ShoppingGraph:
         return {"text": prompt + "\nClarification: " + reply[:1200]}
 
     def research(self, state):
+        started = perf_counter()
         if not self.models.enabled:
-            return {"queries": {}, "tool_trace": []}
+            return {"queries": {}, "tool_trace": [], "research_ms": elapsed_ms(started)}
         schemas = {"search_products": Search, "get_product_evidence": Evidence}
         tools = [{
             "type": "function", "function": {"name": name, "parameters": schema.model_json_schema(),
@@ -323,21 +354,30 @@ class ShoppingGraph:
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(data)[:6500]})
         except (httpx.HTTPError, KeyError, ValueError, TypeError):
             LOG.warning("Tool research did not complete. Using deterministic retrieval.")
-        return {"queries": queries, "tool_trace": trace}
+        return {"queries": queries, "tool_trace": trace, "research_ms": elapsed_ms(started)}
 
     def resolve(self, state):
+        started = perf_counter()
+        result = self._resolve(state)
+        trace = result.setdefault("trace", {})
+        timings = trace.setdefault("timings_ms", {})
+        timings.update(understand=state.get("understand_ms", 0), research=state.get("research_ms", 0),
+                       resolve=elapsed_ms(started))
+        trace.update(prompt_version=PROMPT_VERSION, action=state["patch"]["action"], tools=state.get("tool_trace", []))
+        return {"result": result}
+
+    def _resolve(self, state):
         action, account = state["patch"]["action"], state["account"]
         if action in {"orders", "return"}:
             orders = self.planner.platform.call("commerce_orders", {"account_id": account})
             orders = [order for order in orders if order.get("account_id") == account]
             text = ("Select a delivered order line to check return eligibility." if action == "return" and orders else
                     self.order_summary(orders))
-            return {"result": {"answer": text, "orders": orders, "preserve_plans": True}}
+            return {"answer": text, "orders": orders, "preserve_plans": True}
         if action in {"cart", "checkout", "watch"}:
-            return {"result": {"answer": f'Option is ready for {action}. Review the details before continuing.',
-                               "suggested_action": {"type": action, "plan_id": state["selected"]["id"],
-                                                    "target": state["patch"]["target"]},
-                               "preserve_plans": True}}
+            return {"answer": f'Option is ready for {action}. Review the details before continuing.',
+                    "suggested_action": {"type": action, "plan_id": state["selected"]["id"],
+                                         "target": state["patch"]["target"]}, "preserve_plans": True}
         if action == "compare" and state.get("prior_plans") and not state.get("fixed"):
             plans = state["prior_plans"]
             differences = []
@@ -345,8 +385,8 @@ class ShoppingGraph:
                 weights = [item["specs"].get("weight_g") for item in plan["items"]]
                 weight = f"{sum(weights):,} g combined" if all(w is not None for w in weights) else "weight unverified"
                 differences.append(f'Option {index}: {weight}, latest estimated arrival {iso(plan["quote"]["eta"])}.')
-            return {"result": {"answer": self.describe(plans, False) + "\n" + "\n".join(differences),
-                               "plans": plans, "preserve_plans": True}}
+            return {"answer": self.describe(plans, False) + "\n" + "\n".join(differences),
+                    "plans": plans, "preserve_plans": True}
         visual = None
         if self.catalog.settings.elastic_url and self.catalog.settings.clip_model and (
             state.get("image") or VISUAL.search(state["text"])
@@ -368,19 +408,31 @@ class ShoppingGraph:
                     maximums = dict(goal.get("max_weights", {}))
                     maximums[category] = min(maximums.get(category, weight-1), weight-1)
                     goal = {**goal, "max_weights": maximums}
+        planning = {}
+        started = perf_counter()
         plans, research, search_trace, products = self.planner.find(
             account, goal, state.get("queries"), state.get("fixed"), visual=visual, excluded=excluded,
+            diagnostics=planning,
         )
+        planning_ms = elapsed_ms(started)
+        started = perf_counter()
         if not products:
             products = list(dict.fromkeys(x["product_id"] for x in research[:6]))
         evidence = self.catalog.evidence(products[:10], state["text"]) if products else []
-        return {"result": {
-            "answer": self.describe(plans, bool(research)), "plans": plans, "products": research,
+        highlights = self.highlights(state["text"], evidence)
+        conflicts = any(reason.startswith("conflicting_")
+                        for attempt in planning["passes"] for reason in attempt["rejections"])
+        answer = self.describe(plans, bool(research))
+        if not plans and conflicts:
+            answer = "Relevant specifications disagree. I could not verify a matching plan.\n" + answer
+        return {
+            "answer": answer, "plans": plans, "products": research,
             "evidence": [public_evidence(doc) for doc in evidence],
-            "review_highlights": self.highlights(state["text"], evidence),
+            "review_highlights": highlights,
             "price_alert_target": state["patch"].get("target"),
-            "trace": {"prompt_version": PROMPT_VERSION, "tools": state.get("tool_trace", []), "search": search_trace},
-        }}
+            "trace": {"search": search_trace, "planning": planning,
+                      "timings_ms": {"planning": planning_ms, "evidence": elapsed_ms(started)}},
+        }
 
     def highlights(self, query, evidence):
         if not evidence:

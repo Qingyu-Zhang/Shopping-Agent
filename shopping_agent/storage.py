@@ -76,6 +76,14 @@ class Store:
         with self.transaction() as tx:
             return tx.list(bucket, owner, **query)
 
+    def task_audit(self, owner, task_id, limit):
+        query = select(records.c.value).where(
+            records.c.bucket == "audit", records.c.owner == owner,
+            records.c.value["task_id"].as_string() == task_id,
+        ).order_by(records.c.value["at"].as_float().desc(), records.c.key.desc()).limit(limit)
+        with self.engine.connect() as connection:
+            return list(reversed(connection.execute(query).scalars().all()))
+
 
 class Transaction:
     def __init__(self, connection, sqlite):

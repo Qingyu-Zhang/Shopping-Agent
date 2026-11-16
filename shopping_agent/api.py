@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field, field_validator, model_validator
 
 from .automation import WatchRequest
+from .checkout import audit
 from .core import Fault, Input, Line, Settings, normalize_lines, stable_id, timestamp
 from .platform import MockPlatform
 from .runtime import Runtime, Worker
@@ -196,6 +197,12 @@ def create_app(settings: Settings | None = None, clock=timestamp):
     def task(task_id: str, account: Account, runtime: UseRuntime):
         return required(runtime, "tasks", task_id, account)
 
+    @app.get("/v1/tasks/{task_id}/trace")
+    def task_trace(task_id: str, account: Account, runtime: UseRuntime,
+                   limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        required(runtime, "tasks", task_id, account)
+        return runtime.store.task_audit(account, task_id, limit)
+
     @app.post("/v1/tasks/{task_id}/turns", status_code=202)
     def turn(task_id: str, body: Turn, account: Account, runtime: UseRuntime):
         if runtime.redis:
@@ -263,7 +270,9 @@ def create_app(settings: Settings | None = None, clock=timestamp):
         if plan is None:
             raise Fault("not_found", "The selected plan was not found.", 404)
         lines = [{"offer_id": x["offer_id"], "quantity": x["quantity"]} for x in plan["quote"]["lines"]]
-        return plan, lines, view["goal"]
+        trace = {"task_id": selection.task_id, "plan_id": selection.plan_id,
+                 "plan_version": selection.plan_version, "run_id": view.get("plan_run_id")}
+        return plan, lines, view["goal"], trace
 
     @app.get("/v1/cart")
     def cart(account: Account, runtime: UseRuntime):
@@ -271,19 +280,33 @@ def create_app(settings: Settings | None = None, clock=timestamp):
 
     @app.post("/v1/cart/changes")
     def cart_change(body: CartMutation, account: Account, runtime: UseRuntime):
-        lines = selected(runtime, account, body.selection)[1] if body.selection else [line.model_dump() for line in body.lines]
-        return runtime.platform.call("commerce_cart_write", {
+        trace = None
+        if body.selection:
+            _, lines, _, trace = selected(runtime, account, body.selection)
+        else:
+            lines = [line.model_dump() for line in body.lines]
+        lines = normalize_lines(lines)
+        result = runtime.platform.call("commerce_cart_write", {
             "account_id": account, "operation_id": body.operation_id, "expected_version": body.expected_version,
-            "mode": body.mode, "lines": normalize_lines(lines),
+            "mode": body.mode, "lines": lines,
         })
+        if trace:
+            with runtime.store.transaction(True) as tx:
+                audit(tx, account, "cart_changed", body.operation_id, runtime.clock(), once=True,
+                      cart_version=result["version"], mode=body.mode, **trace)
+                if body.mode == "add" and result["lines"] and normalize_lines(result["lines"]) == lines:
+                    tx.put("cart_plan_context", stable_id(account, str(result["version"])),
+                           {"lines": lines, "selection_trace": trace}, owner=account, once=True)
+        return result
 
     @app.post("/v1/quotes", status_code=201)
     def propose_quote(body: CheckoutQuote, account: Account, runtime: UseRuntime):
         limits = {}
         expected_skus = None
+        trace = None
         address = body.address_id
         if body.selection:
-            plan, lines, limits = selected(runtime, account, body.selection)
+            plan, lines, limits, trace = selected(runtime, account, body.selection)
             expected_skus = {x["offer_id"]: x["sku_id"] for x in plan["quote"]["lines"]}
             address = address or plan["quote"]["address_id"]
         elif body.cart_version is not None:
@@ -291,9 +314,13 @@ def create_app(settings: Settings | None = None, clock=timestamp):
             if value["version"] != body.cart_version:
                 raise Fault("cart_conflict", "The cart changed. Refresh it and retry.")
             lines = value["lines"]
+            cart_context = runtime.store.get("cart_plan_context", stable_id(account, str(body.cart_version)), account)
+            if cart_context and normalize_lines(lines) == cart_context["lines"]:
+                trace = cart_context["selection_trace"]
         else:
             lines = [line.model_dump() for line in body.lines]
-        return runtime.checkout.prepare(account, address or "home", lines, constraints=limits, expected_skus=expected_skus)
+        return runtime.checkout.prepare(account, address or "home", lines, constraints=limits,
+                                        expected_skus=expected_skus, selection_trace=trace)
 
     @app.post("/v1/quotes/{receipt_id}/confirm", status_code=202)
     def confirm(receipt_id: str, body: Confirm, account: Account, runtime: UseRuntime):

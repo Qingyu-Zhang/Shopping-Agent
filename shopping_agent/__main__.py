@@ -49,12 +49,23 @@ def main():
     evaluator = commands.add_parser("evaluate")
     evaluator.add_argument("--cases", type=Path, default=Path("fixtures/search_cases.jsonl"))
     evaluator.add_argument("--k", type=int, default=5)
+    journeys = commands.add_parser("evaluate-journeys")
+    journeys.add_argument("--cases", type=Path, default=Path("fixtures/shopping_journeys.jsonl"))
+    journeys.add_argument("--k", type=int, default=3, choices=(1, 2, 3))
+    journeys.add_argument("--with-models", action="store_true", help="Use configured model services in the isolated evaluation.")
     args = parser.parse_args()
     if args.command in {"api", "platform"}:
         factory = "shopping_agent.api:create_app" if args.command == "api" else "shopping_agent.platform:create_platform_app"
         uvicorn.run(factory, factory=True, host=args.host, port=args.port)
         return
     settings = Settings.from_env()
+    if args.command == "evaluate-journeys":
+        from .evaluation import evaluate_journeys
+        report = evaluate_journeys(args.cases, args.k, model_settings=settings if args.with_models else None)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if report["failed_turns"]:
+            raise SystemExit(1)
+        return
     runtime = Runtime(settings, setup_graph=args.command == "worker")
     try:
         if args.command == "worker":
